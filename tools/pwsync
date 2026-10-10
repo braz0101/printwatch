@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# Synchronise l'environnement de développement puis lance les tests unitaires (voir « Guide de déploiement » du dossier technique).
+set -eu
+cd "$(dirname "$0")/.."
+python3 -m pip install --quiet -e ".[dev]"
+python3 -m pytest -q "$@"

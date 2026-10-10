@@ -1,0 +1,15 @@
+# SNMPv3 authNoPriv (authentification SHA, sans chiffrement) contre le simulateur snmpsim.
+# Simulateur : snmpsim-command-responder --v3-engine-id auto --v3-user pwtest --v3-auth-proto SHA \
+#   --v3-auth-key authkey-test-123 --data-dir=tools/simulator --agent-udpv4-endpoint=127.0.0.1:1161
+# Identifiants jetables, valables UNIQUEMENT pour le simulateur. Variable requise : PRINTWATCH_SNMP_AUTH_PASS.
+[snmp]
+version = "3"
+user = "pwtest"
+level = "authNoPriv"
+auth_proto = "SHA"
+context = "printer-epson"
+timeout = 3.0
+retries = 0
+
+[collector]
+db_path = "data/printwatch-v3sim.db"

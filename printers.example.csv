@@ -1,0 +1,3 @@
+id,name,host,brand,model,location,user,enabled
+epson-compta-1,Compta-1,10.0.0.10,Epson,WF-C879R,Bureau 12,Prénom NOM,1
+hp-direction,Direction,10.0.0.11,HP,M404dn,Étage 3,,1

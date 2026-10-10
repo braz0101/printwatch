@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "printwatch"
+version = "0.12.0"
+description = "Supervision des consommables d'imprimantes réseau (SNMP, Printer MIB RFC 3805)"
+requires-python = ">=3.11"
+dependencies = []          # bibliothèque standard uniquement ; le binaire net-snmp (snmpwalk) est requis à l'exécution
+
+[project.optional-dependencies]
+web = ["fastapi>=0.110", "pydantic>=2", "uvicorn>=0.29"]
+dev = ["pytest>=8", "fastapi>=0.110", "pydantic>=2", "uvicorn>=0.29", "httpx>=0.27"]
+
+[project.scripts]
+printwatch = "printwatch.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["printwatch*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.package-data]
+printwatch = ["static/*.html", "static/assets/*"]

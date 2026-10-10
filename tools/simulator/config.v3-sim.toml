@@ -1,0 +1,13 @@
+# Config de test SNMPv3 contre le simulateur snmpsim. Identifiants jetables, valables UNIQUEMENT pour le simulateur.
+[snmp]
+version = "3"
+user = "pwtest"
+level = "authPriv"
+auth_proto = "SHA"
+priv_proto = "DES"          # AES échoue avec snmpsim 1.2.2 / pysnmp 7.1.30 (« Decryption error ») : limite du simulateur, à tester sur un vrai équipement
+context = "printer-epson"   # snmpsim choisit le fichier .snmprec d'après le nom de contexte
+timeout = 3.0
+retries = 0
+
+[collector]
+db_path = "data/printwatch-v3sim.db"

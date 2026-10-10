@@ -1,0 +1,39 @@
+services:
+  collector:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./printers.csv:/app/printers.csv:ro
+      - ./data:/app/data
+    # Pas de port exposé : le collecteur n'écoute rien.
+    read_only: true
+    tmpfs:
+      - /tmp                     # snmp.conf temporaire (0600) : jamais écrit sur disque persistant
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  web:
+    build: .
+    restart: unless-stopped
+    command: ["--config", "/app/config.toml", "serve", "--host", "0.0.0.0", "--port", "8080"]
+    depends_on: [collector]
+    # Aucun secret SNMP/SMTP : le dashboard ne contacte jamais les imprimantes.
+    # Gestion des imprimantes (ajout / édition / retrait) : lecture seule par défaut. Pour l'activer, décommenter ci-dessous et définir
+    # PRINTWATCH_ADMIN_TOKEN dans l'environnement de `docker compose` (ne jamais mettre .env complet ici : il contient les secrets SNMP).
+    # environment: ["PRINTWATCH_ADMIN_TOKEN", "PRINTWATCH_ALLOWED_HOSTS"]   # ALLOWED_HOSTS : active la garde anti rebinding DNS (inclure localhost, 127.0.0.1)
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      # Écriture requise par le mode WAL (fichier -shm). La lecture seule est garantie par le code :
+      # connexion SQLite ouverte en mode=ro.
+      - ./data:/app/data
+    # Publié sur la boucle locale de la VM uniquement. Pour l'exposer : proxy inverse (TLS + authentification)
+    # sur la VM, jamais de mapping vers 0.0.0.0.
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]

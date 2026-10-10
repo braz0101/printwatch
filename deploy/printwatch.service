@@ -1,0 +1,21 @@
+# Service systemd (VM Linux) : collecte SNMP + dashboard dans un seul processus, redémarré automatiquement.
+# Installation : sudo cp deploy/printwatch.service /etc/systemd/system/ && sudo systemctl enable --now printwatch
+[Unit]
+Description=PrintWatch - supervision des consommables d'imprimantes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=printwatch
+WorkingDirectory=/opt/printwatch
+EnvironmentFile=/opt/printwatch/.env
+ExecStart=/opt/printwatch/venv/bin/printwatch -c /opt/printwatch/config.toml serve --collect -p /opt/printwatch/printers.csv --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/printwatch/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

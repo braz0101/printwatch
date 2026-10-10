@@ -1,0 +1,35 @@
+# Copier en config.toml. Aucun secret ici : mots de passe et communauté SNMP viennent de l'environnement (.env).
+
+[snmp]
+version = "3"                  # "3" en cible ; "2c" tolère un premier test (communauté lue dans PRINTWATCH_SNMP_COMMUNITY)
+user = "printwatch_ro"         # compte SNMPv3 dédié, lecture seule
+level = "authPriv"             # secrets : PRINTWATCH_SNMP_AUTH_PASS / PRINTWATCH_SNMP_PRIV_PASS
+auth_proto = "SHA"
+priv_proto = "AES"
+# context = ""                 # contexte SNMPv3 : inutile pour une imprimante (réservé au simulateur snmpsim)
+timeout = 3.0                  # secondes par requête
+retries = 1
+
+[thresholds]                   # pourcentage RESTANT ; pour la boîte de maintenance : 5 % restant = 95 % plein
+warn = 15.0
+crit = 5.0
+hysteresis = 5.0               # marge avant de considérer l'alerte résolue (évite le yo-yo autour d'un seuil)
+
+[smtp]                         # laisser host vide : les alertes vont alors dans les journaux
+host = ""
+port = 25
+starttls = false
+user = ""                      # si renseigné, mot de passe dans PRINTWATCH_SMTP_PASSWORD
+sender = "printwatch@example.org"
+recipients = []                # ex. ["support-it@example.org"]
+
+[collector]
+db_path = "data/printwatch.db"
+interval_s = 1800              # l'encre varie lentement : 30 min suffisent
+workers = 8
+down_after = 3                 # échecs consécutifs avant l'alerte « injoignable »
+replacement_jump = 20.0        # une hausse d'au moins 20 points est lue comme un remplacement de cartouche
+retention_days = 400
+hp_ledm = true          # HP : combler les niveaux SNMP « inconnus » via l'interface web
+retry_delay_s = 3.0     # relance unique des imprimantes en échec dans le même cycle (0 = désactivé)
+
