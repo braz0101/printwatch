@@ -1,5 +1,7 @@
 # PrintWatch : revue de code complète
 
+> **Document historique.** Il décrit une version antérieure à la 0.13.0 ; l'état actuel est décrit dans le `README.md` (§20 Historique) et le `CHANGELOG.md`.
+
 Livraison analysée : **V11 (0.11.0)** → corrections livrées en **V12 (0.12.0)**.
 Date de la revue : 10 octobre 2026.
 

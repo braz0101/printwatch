@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 from typing import Callable, Protocol
 
+from . import device
 from .config import SnmpConfig
 from .model import RawSupply
 
@@ -166,7 +167,9 @@ class NetSnmpClient:
             args += ["-n", c.context]
         return args
 
-    def _exec(self, cmd: list[str]) -> str:
+    def _exec(self, cmd: list[str], *, partial: bool = False) -> str:
+        """partial : accepte une réponse incomplète. En SNMPv1, un OID absent fait échouer la requête ; net-snmp la rejoue
+        sans lui et renvoie les autres valeurs, mais avec un code de retour non nul."""
         env = {**os.environ, "SNMPCONFPATH": self._dir, "SNMP_PERSISTENT_DIR": self._dir}
         try:
             proc = self._run(
@@ -176,13 +179,28 @@ class NetSnmpClient:
             raise SnmpError(f"binaire net-snmp introuvable ({cmd[0]}) : installer le paquet snmp") from exc
         except subprocess.TimeoutExpired as exc:
             raise SnmpError("délai dépassé") from exc
-        if proc.returncode != 0:
+        if proc.returncode != 0 and not (partial and proc.stdout.strip()):
             msg = _error_line(proc.stderr) or _error_line(proc.stdout) or f"code de retour {proc.returncode}"
             raise SnmpError(msg)
         return proc.stdout
 
     def supplies(self, host: str) -> list[RawSupply]:
         return parse_supplies(self._exec([self.cfg.snmpwalk, "-Cc", *self._args(), host, SUPPLIES_OID]))
+
+    def device_info(self, host: str) -> dict:
+        """Fiche matérielle (voir device.py). Chaque requête est facultative : une table absente donne une liste vide."""
+        def run(cmd: list[str]) -> str:
+            try:
+                return self._exec(cmd, partial=True)
+            except SnmpError:
+                return ""
+
+        scalars = run([self.cfg.snmpget, *self._args(), "-Ot", "-Oe", host, *device.SCALARS.values()])
+        if not scalars.strip():
+            raise SnmpError("aucune donnée matérielle")
+        error_state = run([self.cfg.snmpget, *self._args(), "-Ox", host, device.ERROR_STATE_OID])
+        tables = {name: run([self.cfg.snmpwalk, "-Cc", *self._args(), "-Oe", host, oid]) for name, oid in device.TABLES.items()}
+        return device.parse_device(scalars, error_state, tables)
 
     def sys_descr(self, host: str) -> str | None:
         try:

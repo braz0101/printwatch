@@ -261,6 +261,17 @@ def test_failures_after_a_long_interruption_do_not_mark_down(env):
     assert "down" in types(notifier)
 
 
+def test_manual_mode_counts_every_failure(env):
+    """interval_s = 0 (synchronisation manuelle) : les longs écarts entre deux relevés sont normaux, chaque échec compte."""
+    collector, storage, client, notifier, clock, printer = env
+    collector.cfg.interval_s = 0
+    cycle(env, ink(50))
+    client.data[printer.host] = SnmpError("timeout")
+    for _ in range(3):
+        clock.advance(5); collector.run_cycle([printer])               # trois synchronisations espacées de 5 h
+    assert "down" in types(notifier)
+
+
 def test_collector_never_overwrites_a_printer_record_edited_elsewhere(env):
     """La base fait foi : une fiche modifiée depuis le dashboard n'est pas réécrite par la liste passée au collecteur."""
     collector, storage, client, notifier, clock, printer = env

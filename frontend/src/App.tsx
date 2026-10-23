@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, write, type Collector, type Ev, type State, type Status } from './api'
+import { api, write, type Collector, type Ev, type Me, type Status } from './api'
+import Accounts from './Accounts'
 import AddPanel from './AddPanel'
+import { DEFAULT_FILTER, type Filter, kpis } from './derive'
 import Drawer from './Drawer'
 import FleetTable from './FleetTable'
-import { IconCrit, IconOk, IconSync, IconWarn, Logo } from './Icons'
+import { IconCrit, IconLogout, IconOk, IconScreen, IconSearch, IconSliders, IconSync, IconUser, IconWarn, Logo } from './Icons'
+import { Kpis } from './Overview'
+import Settings from './Settings'
+import Tickets from './Tickets'
 import { ago, fmtDate, useRoute } from './ui'
+import Wall from './Wall'
 
 const REFRESH_MS = 60_000
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -14,7 +20,7 @@ function usePoll() {
   const [err, setErr] = useState<string | null>(null)
   const load = useCallback(async (): Promise<Status | null> => {
     try {
-      const [st, ev] = await Promise.all([api.status(), api.events(100)])
+      const [st, ev] = await Promise.all([api.status(), api.events(200)])
       setData({ st, ev }); setErr(null)
       return st
     } catch (e) { setErr((e as Error).message); return null }       // on garde les dernières données affichées
@@ -52,93 +58,168 @@ function useSync(reload: () => Promise<Status | null>, lastCycle: number | null)
 
 function CollectorBanner({ col, now }: { col: Collector; now: number }) {
   const stopped = col.state === 'stale' || col.state === 'never'
-  const Icon = stopped ? IconCrit : IconWarn
-  const color = stopped ? 'var(--crit)' : 'var(--warn)'
   return (
-    <p role="alert" className="flex items-start gap-3 rounded-xl px-4 py-3 text-sm" style={{ background: `color-mix(in srgb, ${color} 12%, transparent)`, color }}>
-      <Icon width={18} height={18} className="mt-0.5 shrink-0" />
+    <div role="alert" className="banner" data-k={stopped ? 'crit' : 'warn'}>
+      {stopped ? <IconCrit width={18} height={18} style={{ flex: 'none', marginTop: 1 }} /> : <IconWarn width={18} height={18} style={{ flex: 'none', marginTop: 1 }} />}
       <span>
-        {col.state === 'never' && <><b>Aucune collecte enregistrée.</b> Les niveaux affichés ne proviennent d'aucun relevé SNMP. Lancez le collecteur : <code>printwatch serve --collect</code> ou <code>printwatch loop</code>.</>}
-        {col.state === 'stale' && col.last_cycle != null && <><b>La collecte est à l'arrêt :</b> dernier relevé {ago(col.last_cycle, now)} (un cycle toutes les {Math.round(col.interval_s / 60)} min). Les niveaux affichés peuvent ne plus être à jour. Vérifiez que le collecteur tourne.</>}
-        {col.state === 'all_failed' && <><b>Aucune imprimante n'a répondu au dernier relevé</b> ({col.failed} sur {col.polled} en échec). Vérifiez le réseau, la communauté ou les identifiants SNMP.</>}
+        {col.state === 'never' && <><b>Aucune collecte enregistrée.</b> Les niveaux affichés ne proviennent d'aucun relevé SNMP : vérifiez que le service PrintWatch tourne.</>}
+        {col.state === 'stale' && col.last_cycle != null && <><b>La collecte est à l'arrêt :</b> dernier relevé {ago(col.last_cycle, now)} (un cycle toutes les {Math.round(col.interval_s / 60)} min). Les valeurs affichées peuvent ne plus être à jour.</>}
+        {col.state === 'all_failed' && <><b>Aucune imprimante n'a répondu au dernier relevé</b> ({col.failed} sur {col.polled} en échec). Vérifiez le réseau ou la communauté SNMP.</>}
       </span>
-    </p>
+    </div>
   )
 }
 
+/** « · noir et cyan suivis » quand une partie seulement des consommables déclenche des alertes. */
+const INK_NAME: Record<string, string> = { black: 'noir', cyan: 'cyan', magenta: 'magenta', yellow: 'jaune', box: 'boîtier', other: 'autres' }
+function trackedText(inks?: string[]) {
+  if (!inks || inks.length >= 6) return ''
+  const n = inks.map((i) => INK_NAME[i] ?? i)
+  return ` · alertes : ${n.length > 1 ? `${n.slice(0, -1).join(', ')} et ${n[n.length - 1]}` : n[0]}`
+}
+
+export const ROLE_LABEL: Record<string, string> = { lecture: 'Lecture', ecriture: 'Écriture', admin: 'Admin' }
+
 const SYNC_LABEL: Record<SyncState, string> = { idle: 'Synchroniser', running: 'Synchronisation…', done: 'À jour', slow: 'Toujours en cours…', error: 'Échec, réessayer' }
 
-export default function App() {
+interface Props { me: Me; onMe: (m: Me) => void; onLogout: () => void }
+
+export default function App({ me, onMe, onLogout }: Props) {
   const { data, err, reload } = usePoll()
   const route = useRoute()
-  const [filter, setFilter] = useState<State | null>(null)
+  const accounts = me.auth && route.path.startsWith('/comptes')
+  const params = route.path.startsWith('/parametres')
+  const page = accounts || params || route.path.startsWith('/tickets')
+  const [filter, setFilter] = useState<Filter | null>(DEFAULT_FILTER)
+  const [query, setQuery] = useState('')
   const [adding, setAdding] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const fleetRef = useRef<HTMLDivElement>(null)
 
-  const s = data?.st.summary
-  const col = data?.st.collector
-  const caps = data?.st.capabilities
+  const st = data?.st
+  const col = st?.collector
+  const caps = st?.capabilities
+  // RÉSERVÉ AU RÔLE « écriture » : la liste porte les intitulés des demandes de tout le
+  // personnel, parfois un nom ou un message d'erreur. Le rôle « lecture » existe pour
+  // regarder des niveaux d'encre.
+  //
+  // LE RÔLE VIENT DU SERVEUR (`capabilities.role`), pas du compte mémorisé : c'est lui
+  // qui tranche, et il revérifie chaque appel. `me.role` n'est qu'un repli le temps de la
+  // première réponse. D'où la place de ces deux lignes, APRÈS `caps` — les poser plus
+  // haut lisait une variable qui n'existait pas encore.
+  const peutRepartir = (caps?.role ?? me.role) !== 'lecture'
+  const billets = me.auth && peutRepartir && route.path.startsWith('/tickets')
   const last = col?.last_cycle ?? null
   const sync = useSync(reload, last)
+  const k = useMemo(() => (st ? kpis(st) : null), [st])
   useEffect(() => {
-    document.title = s && (s.crit || s.warn) ? `(${s.crit + s.warn}) PrintWatch · Suivi des consommables` : 'PrintWatch · Suivi des consommables'
-  }, [s])
+    const n = k ? k.counts.CRIT + k.counts.INC : 0
+    document.title = n ? `(${n}) PrintWatch · Parc d'impression` : "PrintWatch · Parc d'impression"
+  }, [k])
   useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(null), 7000); return () => clearTimeout(t) }, [notice])
 
   const open = useCallback((printer: string) => route.go(printer), [route])
   const close = useCallback(() => route.go(), [route])
-  const printer = useMemo(() => data?.st.printers.find((p) => p.id === route.printer) ?? null, [data, route.printer])
+  const printer = useMemo(() => st?.printers.find((p) => p.id === route.printer) ?? null, [st, route.printer])
   const canManage = !!caps && caps.manage !== 'off'
+  /** Droits frais à chaque actualisation (un changement de rôle s'applique sans reconnexion) ; sans comptes (démo) : tout. */
+  const isAdmin = !me.auth || (caps?.admin ?? me.role === 'admin')
+  const role = caps?.role ?? me.role
+  /** Un filtre posé depuis les indicateurs ou « À traiter » amène le tableau à l'écran. */
+  const filterAndShow = useCallback((f: Filter | null) => {
+    setFilter(f)
+    if (f) requestAnimationFrame(() => fleetRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  }, [])
 
-  const changed = useCallback(async (what: 'edited' | 'removed') => {
+  const changed = useCallback(async (what: 'edited' | 'removed' | 'incident') => {
     if (what === 'removed') route.go()
-    setNotice(what === 'removed' ? "Imprimante retirée de la supervision (son historique est conservé)." : 'Modifications enregistrées.')
+    if (what !== 'incident') setNotice(what === 'removed' ? 'Imprimante retirée de la supervision (son historique est conservé).' : 'Modifications enregistrées.')
     await reload()
   }, [reload, route])
   const added = useCallback(async (restored: boolean) => {
     setAdding(false)
     setNotice(restored ? 'Imprimante remise en supervision avec son historique.' : caps?.sync
-      ? 'Imprimante ajoutée : premier relevé en cours. Sans réponse SNMP, elle apparaît sous « sans données », en bas de page.'
-      : 'Imprimante ajoutée : elle apparaîtra au prochain cycle de collecte.')
+      ? 'Imprimante ajoutée : premier relevé en cours.' : 'Imprimante ajoutée : elle sera relevée au prochain cycle de collecte.')
     await reload()
   }, [reload, caps?.sync])
 
+  if (route.path.startsWith('/mur')) return <Wall status={st ?? null} err={err} />
+
+  const liveColor = err || col?.state === 'stale' || col?.state === 'never' ? 'var(--crit)' : col?.state === 'all_failed' ? 'var(--warn-bar)' : 'var(--ok)'
+
   return (
-    <div className="min-h-screen">
+    <div style={{ minHeight: '100vh' }}>
       <a href="#contenu" className="skip" onClick={(e) => { e.preventDefault(); document.getElementById('contenu')?.focus() }}>Aller au contenu</a>
       <header className="topbar">
-        <div className="mx-auto flex max-w-[1400px] items-center gap-x-4 px-4 py-2.5 sm:px-6">
-          <a href="#/" className="flex items-center gap-3" aria-label="PrintWatch">
-            <Logo size={34} />
-            <span className="text-[19px] font-semibold leading-tight tracking-tight">PrintWatch</span>
+        <div className="container" style={{ minHeight: 60, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 20px', paddingTop: 10, paddingBottom: 10, boxSizing: 'border-box' }}>
+          <a href="#/" onClick={(e) => { e.preventDefault(); route.go(); setFilter(DEFAULT_FILTER); setQuery('') }} style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text)', textDecoration: 'none' }}>
+            <Logo size={26} /><span style={{ fontSize: 16, fontWeight: 600 }}>PrintWatch</span>
           </a>
-          <button type="button" onClick={() => void reload()} className="muted ml-auto flex items-center gap-2 rounded-full px-2 py-1 text-[13px] hover:bg-[var(--surface-2)]" title={last ? `Dernier relevé SNMP : ${fmtDate(last)}. Cliquer pour actualiser l'affichage.` : 'Cliquer pour actualiser'} aria-live="polite">
-            <i className={`live-dot ${err || col?.state === 'stale' || col?.state === 'never' ? 'err' : col?.state === 'all_failed' ? 'warn' : ''}`} />
-            {err ? 'Connexion perdue' : !data ? 'Chargement…' : last ? `Dernier relevé ${ago(last, data.st.generated_at)}` : 'Aucun relevé'}
+          <span aria-hidden="true" style={{ width: 1, height: 20, background: 'var(--line)' }} />
+          <span className="muted" style={{ fontSize: 13.5 }}>Parc d'impression</span>
+          <label style={{ flex: '1 1 300px', maxWidth: 460, marginLeft: 'auto', position: 'relative', display: 'block' }}>
+            <span className="sr-only">Rechercher une imprimante</span>
+            <IconSearch width={16} height={16} style={{ position: 'absolute', left: 12, top: 10, color: 'var(--text-3)' }} />
+            <input type="search" className="input" value={query} onChange={(e) => { setQuery(e.target.value); if (e.target.value && filter === DEFAULT_FILTER) setFilter(null); if (page) route.go(); else if (e.target.value) fleetRef.current?.scrollIntoView({ block: 'start' }) }}
+              placeholder="Imprimante, adresse IP, n° de série, utilisateur…" style={{ width: '100%', boxSizing: 'border-box', paddingLeft: 36 }} />
+          </label>
+          <button type="button" onClick={() => void reload()} className="seg" style={{ fontWeight: 400 }} aria-live="polite"
+            title={last ? `Dernier cycle de collecte : ${fmtDate(last)}. Cliquer pour actualiser l'affichage.` : "Cliquer pour actualiser l'affichage"}>
+            <span className="dot" style={{ background: liveColor }} />
+            {err ? 'Connexion perdue' : !data ? 'Chargement…' : last ? `Relevé ${ago(last, st!.generated_at)}` : 'Aucun relevé'}
           </button>
           {caps?.sync && (
-            <button type="button" className="btn" onClick={() => void sync.run()} disabled={sync.state === 'running'} aria-live="polite"
-              title="Interroge toutes les imprimantes maintenant, sans attendre le prochain cycle">
+            <button type="button" className="btn" onClick={() => void sync.run()} disabled={sync.state === 'running'} aria-live="polite" title="Interroger toutes les imprimantes maintenant">
               {sync.state === 'done' ? <IconOk width={15} height={15} style={{ color: 'var(--ok)' }} /> : <IconSync width={15} height={15} className={sync.state === 'running' ? 'spin' : ''} />}
               {SYNC_LABEL[sync.state]}
             </button>
           )}
+          {me.auth && peutRepartir && <a href="#/tickets" className="btn" title="Répartir les tickets d'assistance (GLPI)"
+            aria-current={billets ? 'page' : undefined} style={billets ? { background: 'var(--hover)' } : undefined}>Tickets</a>}
+          <a href="#/mur" className="btn btn-icon" title="Écran mural (salle informatique)" aria-label="Ouvrir l'écran mural"><IconScreen width={16} height={16} /></a>
+          {isAdmin && <a href="#/parametres" className="btn btn-icon" title="Paramètres : seuils d'alerte et encres suivies" aria-label="Paramètres"
+            aria-current={params ? 'page' : undefined} style={params ? { background: 'var(--hover)' } : undefined}><IconSliders width={16} height={16} /></a>}
+          {me.auth && <>
+            <a href="#/comptes" className="user-chip" aria-current={accounts ? 'page' : undefined} title={isAdmin ? 'Mon mot de passe et gestion des comptes' : 'Mon mot de passe'}>
+              <IconUser width={16} height={16} style={{ flex: 'none' }} /><span>{me.email}</span>
+              {role && <span className="role-tag" data-role={role}>{ROLE_LABEL[role]}</span>}
+            </a>
+            <button type="button" className="btn btn-icon" onClick={onLogout} title="Se déconnecter" aria-label="Se déconnecter"><IconLogout width={16} height={16} /></button>
+          </>}
         </div>
       </header>
 
-      <main id="contenu" tabIndex={-1} className="mx-auto max-w-[1400px] space-y-4 px-4 py-5 outline-none sm:px-6 sm:py-6">
-        {err && (
-          <p role="alert" className="rounded-xl px-4 py-3 text-sm" style={{ background: 'color-mix(in srgb, var(--crit) 12%, transparent)', color: 'var(--crit)' }}>
-            {data ? `Données non actualisées (${err}). Les dernières valeurs restent affichées.` : `Aucune donnée : ${err}. Lancez un cycle de collecte avec « printwatch once ».`}
-          </p>
-        )}
-        {data && col && col.state !== 'ok' && <CollectorBanner col={col} now={data.st.generated_at} />}
-        {notice && <p role="status" className="flex items-center gap-2 rounded-xl px-4 py-3 text-sm" style={{ background: 'color-mix(in srgb, var(--ok) 12%, transparent)', color: 'var(--ok)' }}><IconOk width={16} height={16} />{notice}</p>}
-        {!data && !err && <div className="grid gap-5 lg:grid-cols-2"><div className="skeleton h-64" /><div className="skeleton h-64" /></div>}
-        {data && <FleetTable status={data.st} filter={filter} onFilter={setFilter} onOpen={open} onAdd={canManage ? () => setAdding(true) : undefined} />}
+      <main id="contenu" tabIndex={-1} className="container" style={{ paddingTop: 28, paddingBottom: 48, display: 'flex', flexDirection: 'column', gap: 24, outline: 'none' }}>
+        {me.must_change && <div role="alert" className="banner" data-k="warn"><IconWarn width={18} height={18} style={{ flex: 'none', marginTop: 1 }} />
+          <span><b>Votre mot de passe est provisoire.</b> {accounts ? 'Remplacez-le ci-dessous par un mot de passe personnel.' : <>Remplacez-le par un mot de passe personnel : <a href="#/comptes" className="link">changer mon mot de passe</a>.</>}</span></div>}
+        {accounts ? <Accounts me={me} onMe={onMe} isAdmin={isAdmin} /> : billets ? <Tickets isAdmin={isAdmin} /> : params ? <Settings onSaved={() => void reload()} readOnly={!isAdmin} /> : <>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', justifyContent: 'space-between', gap: '6px 24px' }}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600, letterSpacing: '-.01em' }}>Vue d'ensemble</h1>
+            <p className="muted" style={{ margin: '4px 0 0', fontSize: 13.5 }}>
+              {st ? `${st.printers.length} imprimantes supervisées · ${st.collector.interval_s ? `relevé SNMP toutes les ${Math.round(st.collector.interval_s / 60)} min` : 'relevé SNMP à la demande (bouton Synchroniser)'}` : 'Chargement du parc…'}
+            </p>
+          </div>
+          {st && <p className="faint" style={{ margin: 0, fontSize: 12.5 }}>Seuils : attention sous {st.thresholds.warn} %, critique sous {st.thresholds.crit} %{trackedText(st.thresholds.inks)} · <a href="#/parametres" className="link" style={{ fontSize: 12.5 }}>modifier</a></p>}
+        </div>
+
+        {err && <div role="alert" className="banner" data-k="crit"><IconCrit width={18} height={18} style={{ flex: 'none', marginTop: 1 }} />
+          <span>{data ? `Données non actualisées (${err}). Les dernières valeurs restent affichées.` : `Impossible de charger les données : ${err}.`}</span></div>}
+        {st && col && col.state !== 'ok' && <CollectorBanner col={col} now={st.generated_at} />}
+        {notice && <div role="status" className="banner" data-k="ok"><IconOk width={18} height={18} style={{ flex: 'none' }} />{notice}</div>}
+
+        {!st ? (
+          <>{!err && <><div className="kpis">{[0, 1, 2, 3, 4].map((i) => <div key={i} className="skeleton" style={{ height: 118 }} />)}</div><div className="skeleton" style={{ height: 380 }} /><div className="skeleton" style={{ height: 520 }} /></>}</>
+        ) : <>
+          <Kpis status={st} filter={filter} onFilter={filterAndShow} />
+          <div ref={fleetRef} style={{ scrollMarginTop: 76 }}>
+            <FleetTable status={st} query={query} filter={filter} onFilter={setFilter} onOpen={open} onAdd={canManage ? () => setAdding(true) : undefined} />
+          </div>
+        </>}
+        </>}
       </main>
 
-      {data && printer && <Drawer key={printer.id} printer={printer} status={data.st} events={data.ev} onClose={close} onChanged={changed} />}
+      {st && printer && <Drawer key={printer.id} printer={printer} status={st} events={data!.ev} onClose={close} onChanged={changed} />}
       {adding && caps && <AddPanel manage={caps.manage} canSync={caps.sync} onClose={() => setAdding(false)} onAdded={added} />}
     </div>
   )

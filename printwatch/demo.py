@@ -86,5 +86,28 @@ class DemoClient:
         self._specs(host)
         return "HP ETHERNET MULTI-ENVIRONMENT (démo)" if host in _BY_HOST and _BY_HOST[host][0].brand == "HP" else "EPSON Built-in Print Server (démo)"
 
+    def device_info(self, host: str) -> dict:
+        """Fiche matérielle fictive : compteur qui avance avec le temps ; la démo-12 a un bourrage, la démo-19 un capot ouvert."""
+        self._specs(host)
+        h = hashlib.md5(host.encode(), usedforsecurity=False).digest()
+        minutes = (self.clock() - self.t0) / 60
+        hp = host in _BY_HOST and _BY_HOST[host][0].brand == "HP"
+        jam, door = host == "192.0.2.12", host == "192.0.2.19"
+        return {
+            "sys_name": f"{'HP' if hp else 'EPSON'}{h[0]:02X}{h[1]:02X}{h[2]:02X}", "serial": f"DEMO{h[3]:02X}{h[4]:02X}{h[5]:02X}",
+            "model": _BY_HOST[host][0].model if host in _BY_HOST else "EPSON WF-C879R Series",
+            "mac": ":".join(f"{b:02X}" for b in (0x02, 0, 0x5E, h[6], h[7], h[8])),
+            "uptime_s": int(86400 * (1 + h[9] % 20) + minutes * 60),
+            "page_count": 5000 + (h[10] << 8 | h[11]) + int(minutes * (1 + h[12] % 5)),
+            "device_status": "warning" if jam or door else "running", "printer_status": "idle",
+            "errors": ["jammed"] if jam else ["doorOpen"] if door else [],
+            "display": ["Bourrage papier"] if jam else ["Capot ouvert"] if door else ["Ready"],
+            "trays": [{"name": "Tray 1" if hp else "Sheet feeder bin 1", "media": "A4", "level": -3, "max": 250},
+                      {"name": "Tray 2" if hp else "Rear Auto Sheet Feeder", "media": None, "level": 0 if jam else -2, "max": 150}],
+            "covers": [{"name": "Front Cover", "status": "open" if door else "closed"}, {"name": "Ink Case Cover", "status": "closed"}],
+            "alerts": [{"severity": "critical", "group": 13, "code": 8, "description": "Paper jam"}] if jam else
+                      [{"severity": "warning", "group": 6, "code": 3, "description": "Front cover open"}] if door else [],
+        }
+
     def ledm(self, host: str) -> list[LedmSupply]:
         return list(_HP_VERY_LOW.get(host, []))

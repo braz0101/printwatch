@@ -1,10 +1,12 @@
-# PrintWatch
+# PrintWatch (IT-MANAGER)
 
-**Supervision des consommables d'un parc d'imprimantes réseau** : niveaux d'encre et de toner, boîtiers de maintenance, alertes,
-prévision de rupture et tableau de bord web, à partir de SNMP (Printer MIB, RFC 3805).
+**Outil du service informatique** pour superviser le parc d'impression et répartir les demandes d'assistance :
+niveaux d'encre et de toner, boîtiers de maintenance, état matériel des imprimantes, incidents, alertes par courriel,
+prévision de rupture, et répartition des tickets GLPI entre les techniciens. Lecture des imprimantes en SNMP (Printer MIB, RFC 3805).
 
-> Version **0.12.0** (livraison « V12 », issue de la revue de code : voir `docs/REVUE_DE_CODE.md`). Cœur Python **sans dépendance** (bibliothèque standard) ; le tableau de bord ajoute FastAPI et
-> uvicorn ; l'interface est une application React compilée et livrée avec le dépôt (**Node.js n'est pas nécessaire pour l'exécuter**).
+> Cœur Python **sans dépendance** (bibliothèque standard, y compris le client GLPI et le coffre de secrets) ; le tableau de bord ajoute
+> FastAPI, pydantic et uvicorn ; l'interface est une application React compilée et livrée dans le dépôt (**Node.js n'est pas nécessaire
+> pour l'exécuter**). Version **0.13.0** : durcissement de sécurité et journal d'audit (voir [§20](#20-historique)).
 
 ---
 
@@ -14,89 +16,103 @@ prévision de rupture et tableau de bord web, à partir de SNMP (Printer MIB, RF
 2. [Architecture](#2-architecture)
 3. [Prérequis](#3-prérequis)
 4. [Démarrage rapide](#4-démarrage-rapide)
-5. [Essayer sans imprimante : le mode démonstration](#5-essayer-sans-imprimante--le-mode-démonstration)
+5. [Mode démonstration](#5-mode-démonstration)
 6. [Configuration](#6-configuration)
 7. [Ligne de commande](#7-ligne-de-commande)
-8. [Le tableau de bord](#8-le-tableau-de-bord)
-9. [Gérer les imprimantes](#9-gérer-les-imprimantes)
-10. [La collecte en détail](#10-la-collecte-en-détail)
-11. [Règles d'alerte et de calcul](#11-règles-dalerte-et-de-calcul)
+8. [Comptes, rôles et sessions](#8-comptes-rôles-et-sessions)
+9. [Le tableau de bord](#9-le-tableau-de-bord)
+10. [Répartition des tickets (GLPI)](#10-répartition-des-tickets-glpi)
+11. [La collecte et les alertes](#11-la-collecte-et-les-alertes)
 12. [API HTTP](#12-api-http)
 13. [Modèle de données](#13-modèle-de-données)
 14. [Sécurité](#14-sécurité)
 15. [Déploiement](#15-déploiement)
-16. [Exploitation : sauvegarde, mise à jour, diagnostic](#16-exploitation--sauvegarde-mise-à-jour-diagnostic)
-17. [Développement](#17-développement)
+16. [Exploitation](#16-exploitation)
+17. [Développement et tests](#17-développement-et-tests)
 18. [Dépannage](#18-dépannage)
-19. [Limites connues](#19-limites-connues)
-20. [Historique des versions](#20-historique-des-versions)
+19. [Limites connues et points ouverts](#19-limites-connues-et-points-ouverts)
+20. [Historique](#20-historique)
+
+| Vue d'ensemble | Répartition des tickets | Comptes et journal d'audit |
+|---|---|---|
+| ![Vue d'ensemble](docs/screenshots/vue-ensemble.png) | ![Tickets](docs/screenshots/tickets.png) | ![Comptes et journal](docs/screenshots/comptes-journal.png) |
+| **Onglet Matériel** | **Écran mural** | **Connexion** |
+| ![Matériel](docs/screenshots/materiel.png) | ![Écran mural](docs/screenshots/ecran-mural.png) | ![Connexion](docs/screenshots/connexion.png) |
+
+*Captures réalisées sur des données fictives (mode démonstration et base de démonstration).*
 
 ---
 
 ## 1. Fonctionnalités
 
-**Collecte**
-- Lecture SNMP **v1, v2c et v3** (`snmpwalk` / `snmpget` de net-snmp) de la table des consommables, pour toutes les marques qui
-  respectent la Printer MIB (Epson, HP, Canon, Ricoh, Brother, Xerox…).
-- **Complément HP** : les LaserJet Pro répondent « inconnu » (`-2`) en SNMP pour les cartouches très basses ou non HP ; PrintWatch lit alors
-  l'interface web de l'imprimante (LEDM) pour combler ces niveaux.
-- Interrogation d'une **liste explicite** d'imprimantes, en parallèle, avec une relance unique des échecs dans le même cycle.
-- **Santé de la collecte** : chaque cycle est enregistré ; le dashboard sait si la collecte tourne, est arrêtée ou n'obtient plus de réponse.
+**Supervision du parc**
+- Lecture SNMP **v1, v2c et v3** (`snmpwalk` / `snmpget` de net-snmp) de la table des consommables, pour toutes les marques qui respectent la Printer MIB.
+- **Fiche matérielle** à chaque relevé : modèle exact, numéro de série, nom réseau, adresse MAC, durée de fonctionnement, compteur de pages, état
+  (`En fonctionnement`, `Prête`…), indicateurs d'erreur (bourrage, capot ouvert, papier…), texte affiché sur l'écran, bacs papier, capots, alertes de l'imprimante.
+- **Complément HP** : niveaux SNMP « inconnus » comblés par l'interface web de l'imprimante (LEDM).
+- **Compteur de pages** historisé et **pages imprimées sur 30 jours** : onglet Matériel et export CSV du tableau.
 
-**Alertes et analyse**
-- Alertes **à états** (avertissement, critique, résolu), avec hystérésis : pas de message à chaque cycle, pas de yo-yo autour d'un seuil.
-- Détection du **remplacement de cartouche**, de l'**injoignabilité** (après N échecs) et du **retour en ligne**.
-- **Prévision de rupture** par régression linéaire sur la consommation observée.
-- Un seul **courriel de synthèse** par cycle (SMTP) ou, sans SMTP, une écriture dans les journaux.
+**Alertes**
+- Machine à états par consommable (attention, critique, résolu) avec hystérésis ; détection des **remplacements** et de l'**injoignabilité**.
+- **Seuils et consommables suivis réglables depuis l'interface** (page Paramètres), relus à chaque cycle.
+- Un **courriel de synthèse** par cycle (SMTP) ou, sans SMTP, une écriture dans les journaux.
+- **Prévision de rupture** (régression linéaire depuis le dernier remplacement).
 
-**Tableau de bord**
-- **Une seule page** : une carte compacte par imprimante, niveaux en barres colorées, état en pastille, tri par urgence, filtres, recherche.
-- Volet de détail avec éprouvettes, prévision et derniers événements.
-- **Gestion depuis le dashboard** : ajouter, modifier (utilisateur, emplacement, nom, adresse…), retirer une imprimante.
-- Bouton **Synchroniser** : relevé immédiat de tout le parc.
-- Bandeaux d'état explicites (collecte arrêtée, aucune réponse…), accessibilité (clavier, ARIA, `prefers-reduced-motion`).
+**Interface**
+- **Vue d'ensemble** : quatre indicateurs (imprimantes en ligne, consommables à commander, ruptures sous 14 jours, incidents matériels) et un **tableau du parc** filtrable, groupable, exportable.
+- **Volet de détail** par imprimante, en cinq onglets : Synthèse, Incidents, Historique, Matériel, Journal.
+- **Incidents** déclarés à la main sur une imprimante, avec auteur, date et résolution.
+- **Écran mural** (`#/mur`) pour la salle informatique : thème sombre, horloge, liste « À traiter », session prolongée automatiquement.
+- **Comptes et rôles** (`lecture`, `ecriture`, `admin`), changement de son mot de passe, gestion des comptes depuis l'interface.
+- **Journal d'audit** : connexions, comptes, paramètres, imprimantes, incidents, tickets ; filtrable, exportable en CSV (administrateurs).
+- **Répartition des tickets GLPI** : liste des demandes ouvertes, qui les tient, attribution à un technicien (avec ou sans compte GLPI).
 
 **Exploitation**
-- Import / export CSV tolérants aux exports Excel (UTF-8 ou ANSI ; séparateur `,`, `;` ou tabulation).
-- **Mode démonstration** sans imprimante ni net-snmp (fonctionne sous Windows).
-- Outils : sonde d'une imprimante (`probe`), matrice de compatibilité (`matrix`), diagnostic de l'installation (`tools/diagnostic.py`).
+- Import / export CSV tolérants aux exports Excel ; mode démonstration sans imprimante ; diagnostic d'installation ; matrice de compatibilité.
+- Déploiement **Windows Server + IIS** (script fourni), **Linux systemd** ou **Docker Compose**.
 
 ---
 
 ## 2. Architecture
 
 ```
- ┌─────────────┐  SNMP (UDP 161)         ┌──────────────────────────┐        ┌────────────────────────┐
- │ Imprimantes │ ◀────────────────────── │  Collecteur              │        │  API FastAPI + page    │
- │ (Epson, HP…)│  HTTP(S) LEDM (HP seul) │  cycle : lecture, alertes│        │  statique (React)      │
- └─────────────┘                         └────────────┬─────────────┘        └───────────▲────────────┘
-                                                      │ écrit                            │ lit (mode=ro)
-                                                      ▼                                  │ écrit : gestion
-                                       ┌──────────────────────────────────┐              │ des imprimantes
-                                       │  SQLite (mode WAL) : printers,   │──────────────┘
-                                       │  supplies, samples, events, cycles│
-                                       └──────────────────────────────────┘
-                              alertes ──▶ SMTP (courriel de synthèse) ou journaux
+ ┌─────────────┐  SNMP (UDP 161)          ┌──────────────────────────────┐        ┌───────────────────────────┐
+ │ Imprimantes │ ◀─────────────────────── │  Collecteur                  │        │  API FastAPI + interface  │
+ │             │  HTTP(S) LEDM (HP seul)  │  consommables, fiche         │        │  React (fichiers locaux)  │
+ └─────────────┘                          │  matérielle, alertes         │        │  session par cookie signé │
+                                          └──────────────┬───────────────┘        └──────┬──────────┬─────────┘
+                                                         │ écrit                         │ lit/écrit│ HTTPS (OAuth 2.0)
+                                                         ▼                               │          ▼
+                                    ┌───────────────────────────────────────┐            │   ┌──────────────┐
+                                    │ SQLite (WAL) : parc, relevés,          │◀───────────┘   │ GLPI 11      │
+                                    │ événements, incidents, techniciens,    │                │ (api.php/v2) │
+                                    │ attributions, réglages                 │                └──────────────┘
+                                    └───────────────────────────────────────┘
+                         data/users.json : comptes (empreintes scrypt) + clé de signature des cookies
+                         .secrets.enc    : coffre DPAPI (Windows) des secrets GLPI
 ```
 
 | Composant | Fichier | Rôle |
 |---|---|---|
-| Client SNMP | `printwatch/snmp.py` | Appelle `snmpwalk` / `snmpget`. Les secrets passent par un `snmp.conf` temporaire (0600), jamais en ligne de commande |
+| Client SNMP | `printwatch/snmp.py` | `snmpwalk` / `snmpget` ; secrets dans un `snmp.conf` temporaire (0600), jamais en ligne de commande |
+| Fiche matérielle | `printwatch/device.py` | Host Resources MIB + Printer MIB : série, compteur, état, erreurs, bacs, capots, alertes, MAC |
 | Normalisation | `printwatch/normalize.py` | Table brute → consommables (couleur, type, pourcentage, valeurs spéciales, réceptacles inversés) |
-| Complément HP | `printwatch/ledm.py` | Lit `/DevMgmt/ConsumableConfigDyn.xml` et comble les niveaux SNMP inconnus |
-| Alertes | `printwatch/alerts.py` | Machine à états OK / avertissement / critique avec hystérésis |
-| Prévision | `printwatch/forecast.py` | Date de rupture estimée et indice de confiance |
-| Collecteur | `printwatch/collector.py` | Un cycle : interrogation parallèle, relance, application des résultats, événements, notification |
-| Synchronisation | `printwatch/sync.py` | Pont « dashboard → boucle de collecte » (un cycle à la demande, sans martelage) |
-| Stockage | `printwatch/storage.py` | SQLite (WAL), migrations automatiques, gestion des fiches d'imprimantes |
+| Complément HP | `printwatch/ledm.py` | Lit `/DevMgmt/ConsumableConfigDyn.xml` pour combler les niveaux SNMP inconnus |
+| Alertes | `printwatch/alerts.py` | Machine à états, seuils, consommables suivis (`AlertSettings`) |
+| Prévision | `printwatch/forecast.py` | Rupture estimée et indice de confiance |
+| Collecteur | `printwatch/collector.py` | Un cycle : interrogation parallèle, relance, événements, notification, purge |
+| Synchronisation | `printwatch/sync.py` | Bouton « Synchroniser » → un cycle immédiat, sans martelage |
+| Stockage | `printwatch/storage.py` | SQLite (WAL), schéma et migrations automatiques |
 | Notifications | `printwatch/notify.py` | Courriel SMTP ou journal |
-| API et dashboard | `printwatch/web.py`, `printwatch/static/` | API JSON, routes de gestion, page unique |
+| Comptes | `printwatch/auth.py` | Comptes, rôles, scrypt, cookie signé HMAC-SHA256, blocage après échecs |
+| GLPI | `printwatch/glpi.py` | Client GLPI 11 (OAuth 2.0, API v2) : lister, voir l'attributaire, attribuer, écrire un suivi |
+| Coffre de secrets | `printwatch/secrets_vault.py` | Secrets chiffrés par DPAPI (Windows, portée machine) |
+| API et interface | `printwatch/web.py`, `printwatch/static/` | API JSON, contrôle d'accès, page unique |
+| CLI | `printwatch/cli.py` | Toutes les commandes ([§7](#7-ligne-de-commande)) |
 | Démo | `printwatch/demo.py` | Parc fictif et relevés simulés |
-| CLI | `printwatch/cli.py` | `probe`, `once`, `loop`, `serve`, `import`, `export`, `status`, `events`, `matrix` |
-| Interface | `frontend/` | Source React 19 + TypeScript + Tailwind 4 ; build commité dans `printwatch/static/` |
+| Interface (source) | `frontend/` | React 19 + TypeScript + Tailwind 4 ; build commité dans `printwatch/static/` |
 
-**Principe clé : la base de données fait foi.** La liste des imprimantes vit dans SQLite et se modifie depuis le dashboard. Le fichier CSV
-n'est qu'un moyen d'**amorcer** une base vide, d'**importer** et d'**exporter** (voir [§9](#9-gérer-les-imprimantes)).
+**La base fait foi** pour la liste des imprimantes : elle se modifie depuis l'interface. Le CSV ne sert qu'à **amorcer** une base vide, à **importer** et à **exporter**.
 
 ---
 
@@ -104,14 +120,12 @@ n'est qu'un moyen d'**amorcer** une base vide, d'**importer** et d'**exporter** 
 
 | Élément | Détail |
 |---|---|
-| Python | **3.11 ou plus récent** |
-| net-snmp | binaires `snmpwalk` et `snmpget` : `sudo apt install snmp` (Linux / WSL), `brew install net-snmp` (macOS). **Inutile en mode démo** |
-| Réseau | UDP/161 du serveur vers les imprimantes ; HTTP(S) vers les HP pour le complément LEDM. Lecture seule |
-| Extras Python | `web` (FastAPI, pydantic, uvicorn) pour le dashboard ; `dev` (tests) |
-| Navigateur | Un navigateur récent (Chrome, Edge, Firefox, Safari) |
-
-Le cœur (`once`, `loop`, `probe`, `status`…) n'a aucune dépendance Python. Les imprimantes doivent avoir **SNMP activé** et une communauté
-(v1/v2c) ou un compte (v3) en lecture seule.
+| Python | **3.11 ou plus récent** (CI : 3.11 et 3.12) |
+| net-snmp | `snmpwalk` et `snmpget` : `sudo apt install snmp` (Linux / WSL) ; sous Windows, installateur net-snmp (chemins à déclarer dans `[snmp]`). **Inutile en mode démo** |
+| Réseau | UDP/161 du serveur vers les imprimantes ; HTTP(S) vers les HP (LEDM) ; HTTPS vers le serveur GLPI si la répartition des tickets est utilisée |
+| Extras Python | `web` (FastAPI, pydantic, uvicorn) pour le tableau de bord ; `dev` pour les tests |
+| Coffre de secrets | **Windows uniquement** (DPAPI). Sous Linux, les secrets GLPI se lisent dans l'environnement |
+| Navigateur | Chrome, Edge, Firefox ou Safari récents |
 
 ---
 
@@ -119,61 +133,47 @@ Le cœur (`once`, `loop`, `probe`, `status`…) n'a aucune dépendance Python. L
 
 ```bash
 # 1. Environnement
-sudo apt install snmp                          # snmpwalk / snmpget
+sudo apt install snmp
 python3 -m venv .venv && . .venv/bin/activate
-pip install -e ".[web]"                        # ou ".[dev]" pour lancer aussi les tests (pytest)
-pytest -q                                      # attendu : 152 passed
+pip install -e ".[web]"                        # ".[dev]" pour lancer aussi les tests
+pytest -q                                      # (avec .[dev]) attendu : 276 passed
 
-# 2. Fichiers de travail
-cp config.example.toml config.toml             # éditer : version SNMP, seuils, SMTP, intervalle
-cp printers.example.csv printers.csv           # liste d'amorçage (voir §6.3)
-cp .env.example .env && chmod 600 .env         # secrets : jamais versionnés
-set -a; . ./.env; set +a                       # charge les variables dans le shell
+# 2. Fichiers de travail (aucun n'est versionné)
+cp config.example.toml config.toml             # version SNMP, seuils, SMTP, intervalle, GLPI
+cp printers.example.csv printers.csv           # liste d'amorçage
+cp .env.example .env && chmod 600 .env         # secrets SNMP / SMTP
+set -a; . ./.env; set +a
 
-# 3. Essayer UNE imprimante, sans rien écrire
-printwatch probe 10.0.0.10
+# 3. Une imprimante, sans rien écrire
+printwatch probe 192.0.2.10
 
-# 4. Dashboard + collecte dans un seul processus
-printwatch serve --collect -p printers.csv     # http://127.0.0.1:8080
+# 4. Le premier compte : un ADMINISTRATEUR (le rôle par défaut est « ecriture »), mot de passe saisi au clavier
+printwatch users add --role admin prenom.nom@exemple.sn
+
+# 5. Tableau de bord + collecte dans un seul processus
+printwatch serve --collect -p printers.csv     # http://localhost:8080
 ```
 
-Premier test sans compte SNMPv3 : dans `config.toml`, `version = "2c"` (ou `"1"`) et `PRINTWATCH_SNMP_COMMUNITY=<communauté>` dans l'environnement.
+> **Le premier compte doit être créé avec `--role admin`** : sans administrateur, personne ne peut gérer les comptes ni les paramètres depuis
+> l'interface (rattrapage : `printwatch users role admin <adresse>`).
 
-Au premier lancement avec `--collect`, la base est vide : le CSV passé avec `-p` l'amorce, un cycle part aussitôt, puis un cycle toutes les
-`interval_s` secondes. Ensuite, **la liste se gère depuis le dashboard** (le CSV n'est plus relu).
-
-Autres modes de lancement :
-
-```bash
-printwatch once -p printers.csv       # un cycle puis arrêt (écrit la base, envoie les alertes)
-printwatch loop -p printers.csv       # collecte seule, en continu (service « collector » de Docker)
-printwatch serve                      # dashboard seul (lit la base alimentée par un autre processus)
-```
+Autres modes : `printwatch once` (un cycle puis arrêt), `printwatch loop` (collecte seule, en continu), `printwatch serve` (tableau de bord seul, sans collecte ni bouton Synchroniser).
 
 ---
 
-## 5. Essayer sans imprimante : le mode démonstration
+## 5. Mode démonstration
 
 ```bash
-printwatch serve --demo                # http://127.0.0.1:8080
+printwatch serve --demo                # http://localhost:8080
 ```
 
-- **Parc fictif** de 11 imprimantes (noms et utilisateurs inventés) dont 2 injoignables, des HP aux niveaux partiels, des niveaux critiques.
-- **Relevés simulés** : les niveaux baissent au fil des minutes (un cycle par minute) pour voir apparaître les alertes.
-- **Aucune dépendance réseau** : ni net-snmp, ni imprimante. **Aucun fichier de configuration lu** (donc ni SMTP réel, ni base de production).
-- Base **jetable** `demo.db` dans le dossier courant, recréée à chaque lancement.
-- Tout fonctionne : Synchroniser, ajout, édition, retrait. Une adresse ajoutée en `10.9.x.x` ou en `.255` « ne répond pas » ; les autres obtiennent des
-  niveaux synthétiques déterministes.
+- **Parc fictif**, relevés simulés (un cycle par minute), **fiches matérielles** simulées : tout l'interface est visible, onglet Matériel compris.
+- **Sans connexion** (aucun compte), sans net-snmp, sans réseau, **aucun fichier de configuration lu**. Base jetable `demo.db` recréée à chaque lancement.
+- La répartition des tickets n'est pas disponible en démo (GLPI non configuré).
+- Sous Windows : `powershell -ExecutionPolicy Bypass -File .\tools\demo.ps1 [-Port 8080]` (crée `.venv-demo`, installe, ouvre le navigateur).
 
-**Sous Windows** (PowerShell, Python 3.11+ requis ; le script indique `winget install -e --id Python.Python.3.12` s'il manque) :
-
-```powershell
-Expand-Archive "$env:USERPROFILE\Downloads\printwatch-v11.zip" -DestinationPath "$env:USERPROFILE\printwatch-demo" -Force
-cd "$env:USERPROFILE\printwatch-demo\printwatch"
-powershell -ExecutionPolicy Bypass -File .\tools\demo.ps1 [-Port 8080]
-```
-
-Le script crée un environnement `.venv-demo`, installe les dépendances, ouvre le navigateur et lance la démo. Ctrl+C l'arrête.
+Pour une démonstration **avec comptes** et 30 jours d'historique : `python tools/seed_demo.py data/demo.db --profile audit`, une config pointant
+`db_path` vers cette base, puis `printwatch users add …` et `printwatch serve`.
 
 ---
 
@@ -181,66 +181,57 @@ Le script crée un environnement `.venv-demo`, installe les dépendances, ouvre 
 
 ### 6.1 `config.toml`
 
-Aucun secret dans ce fichier. Fichier par défaut : `config.toml` du dossier courant, sinon `-c chemin`.
+Aucun secret dans ce fichier. Par défaut `config.toml` du dossier courant, sinon `-c chemin`. Une clé ou une section inconnue est refusée.
 
 | Section | Clé | Défaut | Rôle |
 |---|---|---|---|
-| `[snmp]` | `version` | `"3"` | `"1"`, `"2c"` ou `"3"`. Certains Epson (WF-C5890 observés) ne répondent qu'en v1 |
-| | `user` | | Compte SNMPv3 (obligatoire en v3) |
-| | `level` | `authPriv` | `noAuthNoPriv`, `authNoPriv`, `authPriv` |
+| `[snmp]` | `version` | `"3"` | `"1"`, `"2c"` ou `"3"` |
+| | `user`, `level` | `""`, `authPriv` | Compte SNMPv3 (obligatoire en v3) ; `noAuthNoPriv`, `authNoPriv`, `authPriv` |
 | | `auth_proto`, `priv_proto` | `SHA`, `AES` | Protocoles v3 |
-| | `context` | | Contexte v3 (inutile pour une imprimante ; réservé au simulateur) |
-| | `timeout`, `retries` | `3.0`, `1` | Secondes par requête et relances SNMP |
-| `[thresholds]` | `warn` | `15.0` | Seuil d'avertissement, en **% restant** |
-| | `crit` | `5.0` | Seuil critique, en % restant |
-| | `hysteresis` | `5.0` | Marge avant de considérer l'alerte résolue |
-| `[smtp]` | `host` | `""` | Vide : les alertes vont dans les journaux (expéditeur par défaut : `printwatch@localhost`) |
-| | `port`, `starttls` | `25`, `false` | Port **465** : TLS implicite (SMTPS). Autre port : connexion en clair, relevée par STARTTLS si `starttls = true` |
-| | `user` | `""` | Si renseigné : mot de passe **obligatoire** dans `PRINTWATCH_SMTP_PASSWORD` (absent : l'envoi échoue avec un message explicite) |
-| | `sender`, `recipients` | | Expéditeur et liste de destinataires |
-| `[collector]` | `db_path` | `printwatch.db` | Base SQLite (le fichier d'exemple propose `data/printwatch.db`) |
-| | `interval_s` | `1800` | Intervalle entre deux cycles (l'encre varie lentement) |
-| | `workers` | `8` | Interrogations parallèles |
-| | `down_after` | `3` | Échecs consécutifs avant l'alerte « injoignable » |
-| | `replacement_jump` | `20.0` | Hausse (points) lue comme un remplacement de cartouche |
-| | `retention_days` | `400` | Durée de conservation des relevés, cycles et événements notifiés |
-| | `hp_ledm` | `true` | Combler les niveaux SNMP inconnus des HP via l'interface web |
-| | `retry_delay_s` | `3.0` | Relance unique des échecs dans le même cycle (`0` = désactivé) |
+| | `context` | `""` | Contexte v3 (simulateur seulement) |
+| | `timeout`, `retries`, `command_timeout` | `3.0`, `1`, `30.0` | Par requête, relances, durée maximale d'un `snmpwalk` |
+| | `snmpwalk`, `snmpget` | `snmpwalk`, `snmpget` | Chemins des binaires (Windows : chemins complets) |
+| `[thresholds]` | `warn`, `crit` | `15.0`, `5.0` | Seuils en % restant ; **valeurs par défaut**, la page Paramètres prime dès qu'elle est enregistrée |
+| | `hysteresis` | `5.0` | Marge avant de considérer une alerte résolue (courriels) |
+| `[smtp]` | `host`, `port`, `starttls` | `""`, `25`, `false` | Vide : alertes dans les journaux. Port 465 : TLS implicite |
+| | `user` | `""` | Si renseigné, mot de passe obligatoire dans `PRINTWATCH_SMTP_PASSWORD` |
+| | `sender`, `recipients` | | Expéditeur, destinataires |
+| `[collector]` | `db_path` | `printwatch.db` | Base SQLite ; **`users.json` est créé dans le même dossier** |
+| | `interval_s` | `1800` | Secondes entre deux cycles ; `0` : synchronisation manuelle uniquement (`serve --collect`) |
+| | `workers`, `down_after` | `8`, `3` | Interrogations parallèles ; échecs consécutifs avant « injoignable » |
+| | `replacement_jump` | `20.0` | Hausse (points) lue comme un remplacement |
+| | `retention_days` | `400` | Conservation des relevés, cycles, compteurs et événements notifiés |
+| | `hp_ledm`, `retry_delay_s` | `true`, `3.0` | Complément HP ; relance unique des échecs dans le cycle |
+| `[glpi]` | `url` | `""` | `https://glpi.exemple.sn/api.php`, **sans `/v2`**. Vide : onglet Tickets inactif (`503`) |
+| | `client_id`, `username` | `""` | Client OAuth 2.0 déclaré dans GLPI ; compte de service |
+| | `timeout` | `10.0` | Secondes par appel GLPI |
+| | `marqueurs_intranet` | `["deposee depuis", "intranet"]` | Fragments (tous exigés) qui signent une demande déposée depuis l'intranet ; comparés sans accents, sans casse, entités HTML décodées. Y écrire la phrase de pied de page de **votre** intranet |
+| | `entity_id`, `category_id`, `request_type_id`, `type_ticket` | | Acceptés mais **non utilisés** par le code actuel ([§19](#19-limites-connues-et-points-ouverts)) |
+| | `client_secret_key`, `password_key` | `GLPI_CLIENT_SECRET`, `GLPI_PASSWORD` | **Noms** des deux secrets (coffre, sinon environnement) |
 
-Pour la pratique : **15 minutes à 30 minutes** entre cycles suffisent ; en dessous de 5 minutes, la base grossit vite (une ligne par consommable et
-par cycle) sans gain d'information.
+### 6.2 Secrets
 
-### 6.2 Variables d'environnement (secrets)
-
-| Variable | Usage |
+| Secret | Où |
 |---|---|
-| `PRINTWATCH_SNMP_COMMUNITY` | Communauté SNMP v1 / v2c |
-| `PRINTWATCH_SNMP_AUTH_PASS`, `PRINTWATCH_SNMP_PRIV_PASS` | Mots de passe SNMPv3 |
-| `PRINTWATCH_SMTP_PASSWORD` | Mot de passe SMTP (si `user` renseigné) |
-| `PRINTWATCH_ADMIN_TOKEN` | Code administrateur du dashboard (voir [§14](#14-sécurité)) |
-| `PRINTWATCH_ALLOWED_HOSTS` | Noms d'hôte acceptés dans l'en-tête `Host`, séparés par des virgules (indispensable derrière un proxy inverse ; voir [§14](#14-sécurité)) |
+| `PRINTWATCH_SNMP_COMMUNITY` (v1/v2c), `PRINTWATCH_SNMP_AUTH_PASS`, `PRINTWATCH_SNMP_PRIV_PASS` (v3) | Environnement (`.env`) |
+| `PRINTWATCH_SMTP_PASSWORD` | Environnement |
+| `GLPI_CLIENT_SECRET`, `GLPI_PASSWORD` | **Coffre DPAPI** (`printwatch secret set …`, Windows) ; à défaut, variables d'environnement de même nom |
 
-Elles se placent dans `.env` (`chmod 600`, jamais versionné). Elles ne transitent **jamais** par la ligne de commande.
+Autres variables : `PRINTWATCH_ALLOWED_HOSTS` (noms acceptés dans l'en-tête `Host`, [§14](#14-sécurité)), `PRINTWATCH_USERS_FILE` (fichier des comptes,
+défaut `users.json` à côté de la base), `PRINTWATCH_VAULT_PATH` (emplacement du coffre, défaut `.secrets.enc` à la racine du dépôt),
+`PRINTWATCH_ADMIN_TOKEN` (**mode démo seulement** ; ignoré dès qu'il y a des comptes).
+
+La CLI ne lit pas `.env` : le charger dans le shell (`set -a; . ./.env; set +a`), ou laisser le service le faire (systemd `EnvironmentFile`, script Windows).
 
 ### 6.3 Liste d'imprimantes (CSV)
 
 ```csv
 id,name,host,brand,model,location,user,enabled
-imp-100-16,Pool Comptabilité,10.0.239.71,EPSON,WF-C879RDWF,Bâtiment Administration,Marie DUPONT,1
+epson-compta-1,Compta-1,192.0.2.10,Epson,WF-C879R,Bureau 12,Prénom NOM,1
 ```
 
-| Colonne | Obligatoire | Description |
-|---|---|---|
-| `id` | oui | Identifiant stable (convention : `imp-<3e octet>-<4e octet>`) |
-| `host` | oui | Adresse IP ou nom d'hôte (`hôte:port` accepté, utile pour un simulateur) |
-| `name` | non | Nom affiché |
-| `brand`, `model` | non | Marque et modèle |
-| `location` | non | Emplacement (bâtiment, étage, service) |
-| `user` | non | Utilisateur de l'imprimante (alias de colonne : `utilisateur`) |
-| `enabled` | non | `1`/`0`, `oui`/`non`, `vrai`/`faux` (booléens d'Excel en français) ; défaut `1`. **Toute autre valeur est refusée** (jamais de désactivation silencieuse sur une faute de frappe) |
-
-Le chargeur accepte les **exports Excel** : UTF-8 (avec ou sans BOM) ou ANSI (cp1252), séparateur `,` `;` ou tabulation, en-têtes en majuscules ou avec
-espaces. Les adresses sont validées (une adresse commençant par `-` serait lue comme option par `snmpwalk`) et **une adresse en double est refusée**.
+Seuls `id` et `host` sont obligatoires. UTF-8 ou ANSI, séparateur `,` `;` ou tabulation, en-têtes insensibles à la casse ; `enabled` accepte `1/0`, `oui/non`,
+`vrai/faux` (toute autre valeur est refusée) ; adresse validée, adresse en double refusée.
 
 ---
 
@@ -250,483 +241,414 @@ espaces. Les adresses sont validées (une adresse commençant par `-` serait lue
 printwatch [-c CONFIG] [-v] [--version] <commande> [options]
 ```
 
-| Commande | Options | Rôle |
-|---|---|---|
-| `probe HOTE` | | Lit **une** imprimante, **aucune écriture**. Première chose à lancer sur une nouvelle imprimante (`HOTE:PORT` accepté) |
-| `once` | `-p CSV` | Un cycle de collecte puis arrêt. Code de sortie 1 si toutes les imprimantes ont échoué |
-| `loop` | `-p CSV` | Collecte en continu (un cycle toutes les `interval_s`) |
-| `serve` | `--host` `--port` `--collect` `-p CSV` `--demo` `--no-manage` | Dashboard (défaut `127.0.0.1:8080`). `--collect` ajoute la collecte et le bouton Synchroniser ; `--demo` : parc fictif ; `--no-manage` interdit les modifications |
-| `status` | `--json` | État courant, **une ligne par consommable**, trié par niveau, avec rupture estimée (`--json` : tableau d'objets `printer`, `supply`, `pct`, `alert`, `down`, `forecast_days`…) |
-| `events` | `-n LIMITE` | Journal des derniers événements |
-| `import` | `-p CSV` `--overwrite` `--prune` | Importe un CSV dans la base (voir [§9](#9-gérer-les-imprimantes)) |
-| `export` | `-o FICHIER` `--excel` | Exporte la liste (sauvegarde ; `--excel` : séparateur `;` + BOM pour Excel en français) |
-| `matrix` | `-p CSV` `-o FICHIER` | Matrice de compatibilité par marque et modèle, **sans adresse IP** (joignable à un compte rendu). Sans `-p` : la liste de la base (celle du dashboard) |
+| Commande | Rôle |
+|---|---|
+| `probe HOTE` | Lit **une** imprimante, sans rien écrire |
+| `once [-p CSV]` / `loop [-p CSV]` | Un cycle puis arrêt / collecte en continu (`-p` n'amorce qu'une base vide) |
+| `serve [--host] [--port] [--collect] [-p CSV] [--demo] [--no-manage]` | Tableau de bord (défaut `127.0.0.1:8080`) ; `--collect` : collecte intégrée et bouton Synchroniser |
+| `status [--json]` / `events [-n N]` | État courant par consommable / derniers événements |
+| `import -p CSV [--overwrite] [--prune]` / `export [-o F] [--excel]` | Import / export de la liste |
+| `matrix [-p CSV] [-o F]` | Matrice de compatibilité par modèle, **sans adresse IP** |
+| `users list` | Comptes, rôles, mot de passe provisoire ou non |
+| `users add ADRESSE… [--role lecture\|ecriture\|admin] [--temp]` | Crée des comptes (rôle par défaut : `ecriture`). `--temp` : mot de passe provisoire **aléatoire**, affiché une seule fois |
+| `users passwd ADRESSE… [--temp]` | Change le mot de passe (ferme les sessions du compte) ; `--temp` : provisoire aléatoire |
+| `users role ROLE ADRESSE…` | Change les droits |
+| `users remove ADRESSE…` | Retire des comptes (jamais le dernier administrateur) |
+| `secret list` / `secret set NOM…` / `secret remove NOM…` | Coffre DPAPI (Windows) : noms seulement, valeurs saisies au clavier, jamais affichées |
+| `glpi [-n N]` | Diagnostic GLPI : réglages, secrets posés ou absents, **un appel réel** (lecture seule ; N de 1 à 200) |
+| `audit [-n N] [--user ADRESSE] [--action PRÉFIXE]` | Journal d'audit (`--action login`, `user`, `printer`, `ticket`, `settings`…) |
 
-`-p` n'est utilisé que pour **amorcer une base vide** (`once`, `loop`, `serve --collect`). `-v` active les journaux détaillés.
+Les mots de passe et secrets se **saisissent au clavier** (saisie masquée, confirmation) : jamais en argument. `--temp` génère un mot de passe
+**provisoire aléatoire** (16 caractères lisibles, par exemple `Kq7m-Xz3P-…`), affiché une seule fois pour être transmis de vive voix. Les commandes
+`users` sont inscrites au journal d'audit (compte `cli:<compte système>`).
 
 Exemples :
 
 ```bash
-printwatch probe 10.0.0.10                                  # que remonte cette imprimante ?
-printwatch -c config.toml once -p printers.csv              # un cycle complet
-printwatch status                                           # une ligne par consommable, triée par niveau
+printwatch users add --role admin chef.service@exemple.sn
+printwatch users add --temp --role lecture agent.accueil@exemple.sn       # affiche le provisoire
+printwatch audit --action user -n 20
+printwatch users role ecriture technicien@exemple.sn
 printwatch status --json | jq '.[] | select(.alert=="CRIT") | {printer, supply, pct}'
-printwatch events -n 20
-printwatch export -o sauvegarde.csv --excel                 # liste des imprimantes, lisible dans Excel
+printwatch glpi -n 20
 ```
 
 ---
 
-## 8. Le tableau de bord
+## 8. Comptes, rôles et sessions
 
-Application **React 19 + TypeScript + Tailwind 4**, servie en fichiers statiques par FastAPI. Thème clair, page unique, actualisation automatique toutes les 60 s
-(les dernières données restent affichées si l'API devient injoignable).
+### 8.1 Rôles
 
-### 8.1 Disposition
+Droits cumulatifs, vérifiés **côté serveur à chaque requête** (un changement de rôle s'applique aussitôt, même aux sessions ouvertes).
 
-| Zone | Contenu |
+| Action | `lecture` | `ecriture` | `admin` |
+|---|:---:|:---:|:---:|
+| Consulter le parc, le détail, l'historique, les incidents, l'écran mural | ✔ | ✔ | ✔ |
+| Changer son propre mot de passe | ✔ | ✔ | ✔ |
+| Synchroniser ; ajouter, modifier, retirer une imprimante | | ✔ | ✔ |
+| Déclarer et clôturer un incident | | ✔ | ✔ |
+| Voir les tickets GLPI, les confier ; voir le carnet des techniciens | | ✔ | ✔ |
+| Ajouter ou modifier un technicien | | | ✔ |
+| Modifier les seuils et consommables suivis (Paramètres) | | | ✔ |
+| Créer, réinitialiser, retirer un compte ; changer un rôle | | | ✔ |
+| Consulter et exporter le journal d'audit | | | ✔ |
+| Voir les adresses IP des imprimantes | | ✔ | ✔ |
+
+Garde-fous : un administrateur ne peut ni modifier ses propres droits, ni retirer son propre compte, ni réinitialiser son propre mot de passe depuis l'interface ;
+**le dernier administrateur** ne peut être ni rétrogradé ni retiré.
+
+### 8.2 Comptes et mots de passe
+
+- Comptes identifiés par **adresse e-mail**, dans `data/users.json` (non versionné) : empreintes **scrypt** salées, rôle, dates, et la **clé de signature des cookies**.
+  Le fichier est relu dès qu'il change : `printwatch users …` agit **sans redémarrer** le service.
+- Mot de passe choisi : **10 à 200 caractères**, différent de l'adresse.
+- Un mot de passe posé par un tiers (création ou réinitialisation par un administrateur, ou `--temp`) est **provisoire**. Tant qu'il n'est pas remplacé,
+  la session **ne sert qu'à le remplacer** : l'interface n'affiche que le formulaire « Mon mot de passe » et l'API refuse tout le reste (`403`, `code: must_change`).
+- Mot de passe oublié : un administrateur le réinitialise depuis la page Comptes, ou `printwatch users passwd ADRESSE` sur le serveur.
+
+### 8.3 Sessions
+
+| Point | Comportement |
 |---|---|
-| **En-tête** | Logo ; **« Dernier relevé il y a X min »** (heure du dernier cycle SNMP, pas celle de la page ; pastille verte, orange ou rouge) ; bouton **Synchroniser** (si disponible) |
-| **Bandeaux** | Collecte à l'arrêt, jamais lancée, ou aucune imprimante n'a répondu ; confirmations d'actions |
-| **Barre d'outils** | Recherche ; filtres **Toutes / Critiques / Attention / OK** (avec compteurs) ; bouton **Ajouter** (si la gestion est active) |
-| **Parc** | Une carte par imprimante qui a des données |
-| **Sans données** | Puce repliable en bas de page (voir ci-dessous) |
-| **Volet de détail** | S'ouvre à droite au clic sur une carte |
+| Cookie | `pw_session`, signé HMAC-SHA256, `HttpOnly`, `Secure`, `SameSite=Strict` |
+| Durée | 12 h, oublié à la fermeture du navigateur ; **« Rester connecté »** : 90 jours, renouvelé à mi-vie (coché d'office sur l'écran mural) |
+| Invalidation | Changer ou réinitialiser le mot de passe, ou retirer le compte, invalide **tous** les cookies du compte. La **déconnexion révoque le jeton** côté serveur (même copié ailleurs) ; les autres sessions du compte, par exemple l'écran mural, restent ouvertes |
+| Blocage | 5 échecs en 15 min pour un même compte **ou** un même poste → 15 min de blocage (`429`). Compteurs **en mémoire** (remis à zéro au redémarrage) |
+| `Secure` | Le cookie n'est renvoyé qu'en HTTPS, ou sur `http://localhost` en test |
 
-### 8.2 La carte d'imprimante
+---
 
-```
- Pool Comptabilité                                  (✓)     ← nom, pastille d'état
- Marie DUPONT · Bâtiment Administration                     ← utilisateur · emplacement (modèle au survol)
- ▬▬▬▬▬▬▬▬▬▬▬  29 %   ▬▬▬▬▬▬▬▬▬▬▬  82 %                      ← barres colorées par encre, pourcentage à droite
- ▬▬▬▬▬▬▬▬▬▬▬  17 %   ▬▬▬▬▬▬▬▬▬▬▬  22 %
-```
+## 9. Le tableau de bord
 
-- **Barres** : la couleur de la barre identifie l'encre (noir, cyan, magenta, jaune) ; pas de libellé. Le nom du consommable apparaît au survol.
-  Une barre à l'état critique est cerclée de rouge ; le pourcentage est coloré selon l'alerte.
-- **Pastille d'état** : icône et couleur ; le libellé (« Critique », « OK »…) apparaît au survol et pour les lecteurs d'écran.
-- **« N non remontés »** (orange) : l'imprimante ne publie pas le niveau de N consommables (par exemple une cartouche HP non reconnue) ; **aucune alerte n'est
-  possible sur ceux-là**.
-- Les cartes sont **triées par urgence** (critique, attention, injoignable, OK), puis par niveau le plus bas.
-- Clic n'importe où sur la carte : ouvre le volet de détail.
-
-### 8.3 États
-
-| État | Condition |
-|---|---|
-| **Critique** | Au moins un consommable sous le seuil critique (`crit`, 5 % par défaut) |
-| **Attention** | Au moins un consommable sous le seuil d'avertissement (`warn`, 15 %) |
-| **OK** | Aucune alerte |
-| **Injoignable** | Aucune réponse depuis `down_after` cycles consécutifs ; les valeurs sont marquées périmées |
-| **Sans relevé** | Aucun consommable lu pour l'instant |
-
-Les états sont **exclusifs par imprimante** : la somme des pastilles du parc vaut le nombre d'imprimantes.
-
-### 8.4 La section « Sans données »
-
-Pour garder la page lisible, les imprimantes **sans données exploitables** (injoignables, jamais relevées, ou aux niveaux seulement partiels) sont repliées sous la puce
-**« Sans données (N) »** en bas de page. Un clic la déroule : une tuile par imprimante avec son nom, son utilisateur, la raison (« relevé il y a 3 h »,
-« jamais relevée », « niveaux non remontés ») et sa pastille. **Une imprimante en alerte n'est jamais masquée**, même si certains de ses niveaux manquent.
-Une recherche porte toujours sur tout le parc, y compris cette section.
-
-### 8.5 Le volet de détail
-
-- En-tête : nom, emplacement · modèle, utilisateur, état.
-- **Éprouvettes** de chaque consommable avec pourcentage et, si la prévision est disponible, **« ≈ N j »** avant rupture.
-- Mention « Dernier relevé il y a X min » ; si l'imprimante ne répond plus, un message explique que les niveaux sont périmés.
-- Ligne orange pour les niveaux non remontés.
-- **Derniers événements** de l'imprimante (alertes, remplacements, pannes).
-- **Crayon** : modifier la fiche ; retrait de la supervision ([§9](#9-gérer-les-imprimantes)).
-- Fermeture : bouton ✕, clic hors du volet ou touche **Échap**. Le focus reste dans le volet (Tab / Maj+Tab) puis revient à la carte.
-
-### 8.6 Bandeaux et pastille de l'en-tête
-
-| État de la collecte | Pastille | Message |
+| Adresse | Page | Accès |
 |---|---|---|
-| `ok` | verte | (aucun) |
-| `stale` : aucun cycle depuis plus de 2 intervalles | rouge | « La collecte est à l'arrêt : dernier relevé il y a X » |
-| `never` : aucun cycle enregistré | rouge | « Aucune collecte enregistrée » : lancer `serve --collect` ou `loop` |
-| `all_failed` : le dernier cycle n'a obtenu aucune réponse | orange | « Aucune imprimante n'a répondu au dernier relevé » : réseau, communauté, identifiants |
-| API injoignable | rouge | « Connexion perdue » ; les dernières données restent affichées |
+| `#/` | **Vue d'ensemble** : indicateurs et tableau du parc | Tous |
+| `#/?p=<id>` | Volet de détail d'une imprimante | Tous |
+| `#/tickets` | Répartition des tickets GLPI | `ecriture`, `admin` |
+| `#/parametres` | Seuils et consommables suivis | `admin` (consultation seule pour les autres) |
+| `#/comptes` | Mon mot de passe ; comptes, rôles et **journal d'audit** (administrateurs) | Tous |
+| `#/mur` | Écran mural | Tous |
 
-### 8.7 Affichage des noms
+### 9.1 Vue d'ensemble
 
-Les abréviations courantes sont **développées à l'affichage** (les données restent intactes) : `BAT` → Bâtiment, `ADM` → Administration, `INSP` → Inspection,
-`RDC` → Rez-de-chaussée, `APPRO` → approvisionnement, `1IER` → 1er. Les mots en majuscules de plus de 3 lettres passent en minuscules avec majuscule initiale ;
-les sigles de 3 lettres ou moins (RH, ADV…) sont conservés. Pour en ajouter : dictionnaire `ABBR` dans `frontend/src/ui.ts`, puis `npm run build`.
+- **Indicateurs** (cliquables, ils filtrent le tableau) : **Imprimantes en ligne** (N / total, nombre sans réponse), **Consommables à commander**
+  (critiques et sous le seuil d'attention), **Ruptures sous 14 jours** (la plus proche), **Incidents matériels** (incidents ouverts).
+- **Tableau du parc** : filtres **Critiques et attention** (par défaut), **Toutes**, **Critiques**, **Injoignables**, **OK** ; **Grouper** par emplacement,
+  modèle ou sous-réseau ; **Exporter** les lignes affichées (CSV pour Excel : état, fiche, n° de série, niveaux, rupture, compteur de pages, pages sur 30 jours) ;
+  **Ajouter une imprimante** (rôle `ecriture`).
+  Colonnes : État, Imprimante, Encres (% restant), Maintenance (% de remplissage du boîtier), Rupture, Adresse IP, Dernier relevé.
+- **Recherche** dans l'en-tête : nom, emplacement, utilisateur, marque, modèle, adresse IP, numéro de série, adresse MAC, nom réseau.
+- En-tête : « Relevé il y a X min » (pastille verte, orange ou rouge selon la santé de la collecte), **Synchroniser** (avec `serve --collect`, rôle `ecriture`).
+- Bandeaux : collecte arrêtée, jamais lancée, aucune imprimante n'a répondu, connexion perdue, mot de passe provisoire.
 
----
+### 9.2 Volet de détail
 
-## 9. Gérer les imprimantes
-
-### 9.1 Depuis le dashboard
-
-| Action | Comment |
+| Onglet | Contenu |
 |---|---|
-| **Ajouter** | Bouton **Ajouter** → nom et adresse obligatoires ; emplacement, utilisateur, marque, modèle facultatifs. L'identifiant est dérivé de l'adresse (`imp-<3e>-<4e octet>`). Un **premier relevé est lancé aussitôt**. Si l'imprimante ne répond pas en SNMP, elle apparaît sous « Sans données ». Une adresse déjà suivie est refusée (conflit) |
-| **Modifier** | **Crayon** dans le volet de détail : nom, adresse, emplacement, utilisateur, marque, modèle. Seuls les champs changés sont envoyés. Un **changement d'adresse remet à zéro** l'état « injoignable » et déclenche un relevé |
-| **Retirer** | Dans le formulaire de modification, **« Retirer de la supervision… »** avec confirmation. C'est un **archivage** : l'imprimante disparaît du dashboard, son **historique est conservé**. Ajouter de nouveau la même adresse la remet en service avec son historique |
-| **Synchroniser** | Bouton en haut à droite : relevé immédiat de tout le parc. États : « Synchronisation… », « À jour », « Toujours en cours… » (au-delà de 90 s), « Échec, réessayer ». **Un cycle par 15 s au plus, jamais deux en parallèle** : un clic compulsif ne martèle pas le réseau. Disponible avec `serve --collect` |
+| **Synthèse** | Consommables (niveau, reste, rupture estimée ; « non suivi » si exclu des alertes), fiche (emplacement, utilisateur, modèle, adresse IP, n° de série, état matériel), incident en cours |
+| **Incidents** | Déclarer un incident (Bourrage papier, Panne matérielle, Consommable, Réseau / connexion, Qualité d'impression, Autre ; description jusqu'à 1 000 caractères) ; incidents en cours et clôturés, avec auteur, date et résolution |
+| **Historique** | Courbes des niveaux ; remplacements détectés en pointillés |
+| **Matériel** | Modèle exact, n° de série, adresse MAC, adresse IP, nom réseau, emplacement et contact déclarés, durée de fonctionnement, **compteur de pages**, **pages sur 30 jours**, état et activité, texte de l'écran, indicateurs d'erreur, bacs papier, capots, alertes publiées par l'imprimante |
+| **Journal** | Événements de l'imprimante (alertes, remplacements, pannes) |
 
-Les boutons n'apparaissent que si le serveur les autorise (voir [§14](#14-sécurité)).
+**Modifier** (rôle `ecriture`) : nom, adresse, emplacement, utilisateur, marque, modèle ; « Retirer de la supervision » archive l'imprimante (historique conservé).
 
-### 9.2 Import, export, sauvegarde
+### 9.3 Paramètres
 
-```bash
-printwatch import -p printers.csv                 # ajoute les imprimantes inconnues ; ne touche PAS aux fiches existantes
-printwatch import -p printers.csv --overwrite     # le CSV reprend la main sur les fiches existantes
-printwatch import -p printers.csv --prune         # retire de la supervision celles absentes du CSV (historique conservé)
-printwatch export -o sauvegarde.csv [--excel]     # liste complète (y compris archivées, colonne enabled)
-```
+Seuils **attention** et **critique** (en % restant ; critique < attention) et consommables qui déclenchent des alertes : noir, cyan, magenta, jaune,
+boîtier de maintenance, autres. L'affichage change aussitôt ; les courriels suivent au cycle suivant. Un consommable non suivi reste affiché mais
+ne passe jamais en attention ni en critique.
 
-**La base fait foi** : modifier `printers.csv` n'a aucun effet sur une base déjà peuplée, sauf `import --overwrite`. Le CSV amorce une base **vide** (une seule fois),
-d'où la règle simple : *on édite dans le dashboard, on exporte pour sauvegarder, on importe pour migrer ou restaurer*.
+### 9.4 Journal d'audit
 
----
+Page Comptes, administrateurs. Chaque action sensible y est inscrite avec la date, le compte, l'action, le détail et le poste (adresse transmise par le proxy) :
+connexions et échecs, déconnexions, changements de mot de passe (réussis et refusés), comptes créés, retirés, réinitialisés, droits modifiés (`lecture → ecriture`),
+paramètres, imprimantes ajoutées, modifiées (**ancienne et nouvelle valeur** de chaque champ), retirées, incidents, techniciens, tickets confiés, synchronisations,
+et les commandes `printwatch users`. Filtres par compte et par type, pagination, **export CSV** (formules neutralisées pour Excel).
+**Jamais** de mot de passe ni de jeton ; une adresse inconnue tapée à la connexion est notée `(inconnu)` (c'est parfois un mot de passe tapé dans le mauvais champ).
+Conservation : `retention_days`.
 
-## 10. La collecte en détail
+### 9.5 Écran mural
 
-### 10.1 Un cycle
-
-1. **Liste** : lue dans la base à chaque cycle (les ajouts et modifications du dashboard sont pris en compte à chaud) ; base vide : amorçage depuis le CSV.
-2. **Interrogation** : `snmpwalk` de la table des consommables (OID `1.3.6.1.2.1.43.11.1.1`, colonnes 4 à 9) et `snmpget` de la description système, en parallèle
-   (`workers`). **HP** : si des toners restent « inconnus », lecture de l'interface web pour les combler.
-3. **Relance** : les imprimantes en échec sont réinterrogées **une fois** après `retry_delay_s` (perte UDP ponctuelle, imprimante qui se réveille).
-4. **Application** : mise à jour des consommables, un relevé en historique, calcul des états d'alerte, détection des remplacements, **calcul de la rupture estimée** (une seule fois par cycle, mémorisée en base), comptage des échecs.
-5. **Notification** : un courriel de synthèse (ou une écriture dans les journaux).
-6. **Nettoyage** : purge des données plus anciennes que `retention_days`, **au plus une fois par heure** (elle parcourt l'historique).
-7. **Battement de cœur** : le cycle est enregistré (table `cycles`) : c'est ce que lit le dashboard pour afficher « Dernier relevé ».
-
-### 10.2 Reprise après interruption
-
-Si le dernier cycle date de plus de 2 intervalles (poste en veille, coupure de courant, service arrêté), le journal affiche *« collecte reprise après X min
-d'interruption »* et **les échecs de ce cycle de reprise ne comptent pas vers « injoignable »** : le réseau ou les imprimantes sont peut-être encore en train de redémarrer.
-Un échec persistant est bien compté au cycle suivant.
-
-### 10.3 Complément HP (LEDM)
-
-Les LaserJet Pro (M479 observés) répondent `-2` (« inconnu ») en SNMP pour les cartouches **très basses** ou **non HP** (compatibles), alors que leur interface web publie un état
-(`ok`, `low`, `veryLow`, `nonHP`) et un pourcentage dans `/DevMgmt/ConsumableConfigDyn.xml`. Quand un toner reste inconnu en SNMP, PrintWatch lit ce fichier (HTTP, sinon HTTPS sans
-vérification du certificat auto-signé de l'imprimante) et **comble uniquement les niveaux inconnus**, en faisant correspondre par référence de cartouche (par exemple `W2033A`), sinon par couleur.
-
-- Une **valeur SNMP valide n'est jamais remplacée**.
-- En cas d'échec (port fermé, XML inattendu, réponse trop volumineuse, `DOCTYPE`/`ENTITY` refusés), le niveau reste « inconnu » et le cycle continue.
-- **Lecture du « 0 % »** : pour HP, `veryLow` signifie « très bas, à remplacer » : l'imprimante peut encore imprimer. L'alerte est critique, mais ce n'est pas forcément « vide ».
-- Désactivation : `hp_ledm = false`.
-
-### 10.4 Valeurs SNMP spéciales
-
-| Valeur brute | Sens | Traitement |
-|---|---|---|
-| `-1` | autre | Aucun pourcentage, aucune alerte, état précédent conservé |
-| `-2` | inconnu | Idem (affiché « — » ; comblé par LEDM pour les HP) |
-| `-3` | « il en reste » | Aucun pourcentage ; « Présente » ; aucune alerte |
+`#/mur`, prévu pour un écran de la salle informatique : thème sombre, heure, quatre indicateurs, liste **À traiter** et tuiles du parc (nom sur deux lignes, état, encre la plus basse).
+La page de connexion y coche « Rester connecté » d'office ; la session se prolonge tant que la page tourne.
 
 ---
 
-## 11. Règles d'alerte et de calcul
+## 10. Répartition des tickets (GLPI)
+
+Les agents **déposent** leurs demandes ailleurs (intranet, courriel) ; le service informatique les **répartit** ici. PrintWatch **ne crée pas** de ticket.
+
+### 10.1 Mise en service
+
+1. Dans GLPI 11 : déclarer un **client OAuth 2.0** (Configuration > Clients API) et un **compte de service**. L'API utilisée est `api.php` (v2) ; l'ancienne `apirest.php` n'est pas utilisée.
+2. Dans `config.toml`, section `[glpi]` : `url` (`…/api.php`, **sans `/v2`**), `client_id`, `username`.
+3. Poser les deux secrets :
+   - **Windows** : `printwatch secret set GLPI_CLIENT_SECRET GLPI_PASSWORD` (saisie masquée, coffre DPAPI `.secrets.enc`) ;
+   - **Linux / essai** : variables d'environnement `GLPI_CLIENT_SECRET` et `GLPI_PASSWORD`.
+4. Vérifier : `printwatch glpi` (réglages, secrets « posé / ABSENT », puis un appel réel qui liste les tickets ouverts).
+5. **Redémarrer le service** : le serveur lit les secrets et construit le client GLPI une seule fois.
+
+### 10.2 Utilisation (`#/tickets`)
+
+- **Liste** des tickets ouverts (tout sauf Résolu et Clos), du plus récent au plus ancien, avec leur **état**, leur **catégorie** et **qui les tient**.
+  Case « Seulement les demandes déposées depuis l'intranet » : reconnaît la phrase de pied de page de l'intranet (`[glpi] marqueurs_intranet`), avec ou sans accents, en HTML ou non.
+- **Confier à** : choisir un technicien du carnet.
+  - Technicien **avec adresse GLPI** : PrintWatch cherche son compte GLPI par adresse et **l'attribue dans GLPI**. Si GLPI refuse, rien n'est enregistré et l'écran le dit.
+  - Technicien **sans compte GLPI** (stagiaire, prestataire) : PrintWatch écrit un **suivi public** dans le ticket (« Ticket confié à … depuis PrintWatch. »)
+    et garde l'attribution dans sa base, marquée **hors GLPI**.
+- **Carnet des techniciens** (administrateurs) : nom, adresse GLPI facultative, actif ou non. Un technicien retiré reste affiché sur ses anciens tickets.
+
+Appels GLPI effectués : `POST /token` (jeton gardé jusqu'à son expiration, une heure au plus, renouvelé sur `401`), `GET v2/Assistance/Ticket`,
+`GET v2/Assistance/Ticket/{id}/TeamMember/assigned` (dix en parallèle), `GET v2/Administration/User` (recherche par adresse),
+`POST v2/Assistance/Ticket/{id}/TeamMember`, `POST v2/Assistance/Ticket/{id}/Followup`.
+
+---
+
+## 11. La collecte et les alertes
+
+**Un cycle** : liste lue dans la base (édition à chaud) ; interrogation parallèle (consommables, description, **fiche matérielle**) ; complément HP ;
+relance unique des échecs ; application (états, remplacements, prévision, compteur de pages) ; courriel de synthèse ; purge au plus une fois par heure ;
+enregistrement du cycle (ce que lit « Relevé il y a X min »). Après une interruption de plus de deux intervalles, les échecs du cycle de reprise ne comptent pas vers « injoignable ».
 
 | Sujet | Règle |
 |---|---|
-| Pourcentage | `niveau / capacité`. **Restant** pour l'encre et le toner ; **inversé** pour les réceptacles (boîtier de maintenance, toner usagé) : « 7 % restant » = boîtier plein à 93 % |
-| Seuils | `warn` 15 %, `crit` 5 % (restant), **hystérésis** de 5 points : l'alerte n'est levée qu'au-dessus de seuil + 5 |
-| Événements | `warn`, `critical`, `resolved`, `replaced`, `down`, `up` |
-| Premier relevé | Une cartouche déjà sous le seuil au démarrage déclenche son alerte |
-| Remplacement | Hausse ≥ `replacement_jump` (20 points) entre deux relevés : état remis à zéro, événement `replaced` tracé (sans courriel) |
-| Injoignable | Après `down_after` (3) échecs consécutifs : un événement `down` (une seule fois), puis `up` au retour. Les valeurs sont marquées périmées et aucune prévision n'est calculée |
-| Courriel | **Un seul récapitulatif par cycle** ; si le SMTP échoue, les événements restent en attente et repartent au cycle suivant |
-| Prévision | **Calculée par le collecteur à chaque cycle** (35 jours d'historique) et lue telle quelle par l'API (`/api/status` répond en quelques millisecondes quel que soit le volume d'historique). Régression linéaire sur le segment suivant le dernier remplacement ; confiance `low` / `medium` / `high` selon la durée et la chute observées ; consommation inférieure à 0,05 point/jour : « ne consomme pas » |
-| Synthèse | Comptée **par imprimante** (critique, attention, injoignable, OK, sans relevé : exclusifs). Le courriel, lui, compte des **alertes** (consommables) |
+| Pourcentage | `niveau / capacité` ; **inversé** pour les réceptacles : « 7 % restant » = boîtier plein à 93 % |
+| Valeurs spéciales | `-1` autre, `-2` inconnu (comblé par LEDM pour HP), `-3` « il en reste » : ni pourcentage ni alerte |
+| États | Critique sous `crit`, attention sous `warn` ; retour à la normale au-delà de seuil + hystérésis (courriels). L'**affichage** applique les seuils courants sans hystérésis |
+| Événements | `warn`, `critical`, `resolved`, `replaced` (sans courriel), `down`, `up` |
+| Remplacement | Hausse ≥ `replacement_jump` entre deux relevés |
+| Injoignable | Après `down_after` échecs consécutifs ; valeurs marquées périmées |
+| Courriel | Un récapitulatif par cycle ; en cas d'échec SMTP, renvoyé au cycle suivant |
+| Prévision | Calculée par le collecteur (35 jours d'historique, segment après le dernier remplacement) |
+| Fiche matérielle | Facultative : un échec ne compromet jamais le relevé des consommables |
 
 ---
 
 ## 12. API HTTP
 
-Base : `http://127.0.0.1:8080`. Réponses JSON. (La documentation interactive de FastAPI est désactivée : la politique CSP du dashboard n'autorise aucune ressource externe.)
+Réponses JSON. Documentation interactive de FastAPI désactivée. **Toute l'API exige une session**, sauf `/api/health`, `/api/auth/login` et `/api/auth/me`.
+Les écritures exigent en plus la **même origine web** (`403` sinon) et le rôle indiqué.
 
-### 12.1 Lecture
+### 12.1 Session et comptes
 
-| Méthode et route | Rôle |
-|---|---|
-| `GET /` | Page unique (HTML, CSS et JS locaux, aucune ressource externe) |
-| `GET /api/status` | Imprimantes triées par urgence (consommables, alertes, prévision), résumé, seuils, **santé de la collecte** (`collector`) et **capacités** (`capabilities`) |
-| `GET /api/events?limit=30` | Derniers événements |
-| `GET /api/history/{imprimante}/{consommable}?days=30` | Série `{ts, pct}` d'un consommable |
-| `GET /api/series?days=30&points=60[&printer=id]` | Séries de niveau du parc, rééchantillonnées sur une grille commune, avec les remplacements détectés |
-| `GET /api/availability?days=30` | Périodes d'injoignabilité et disponibilité (%) par imprimante |
-| `GET /api/fleet/daily?days=30` | État de chaque imprimante par jour et totaux du parc |
-
-Les trois dernières routes ne sont plus utilisées par l'interface mais restent disponibles pour une intégration (rapports, supervision externe).
-
-`/api/status` : champs utiles
-
-```jsonc
-{
-  "generated_at": 1791500000.0,
-  "collector": { "last_cycle": 1791499800.0, "polled": 21, "failed": 7, "interval_s": 1800,
-                 "state": "ok",                       // ok | stale | never | all_failed
-                 "running": false },                  // présent avec serve --collect
-  "capabilities": { "sync": true, "manage": "open" }, // manage : off | open | token
-  "summary": { "printers": 21, "crit": 4, "warn": 1, "down": 2, "ok": 5, "nodata": 9 },   // comptés par imprimante, exclusifs
-  "printers": [ { "id": "imp-100-16", "name": "…", "state": "OK", "user": "…", "supplies": [ … ] } ]
-}
-```
-
-L'adresse (`host`) d'une imprimante n'est exposée que si la gestion est active.
-
-### 12.2 Écriture
-
-| Méthode et route | Corps JSON | Réponses |
+| Route | Rôle | Corps / réponse |
 |---|---|---|
-| `POST /api/sync` | (aucun) | `202` `{"state": "started" \| "running" \| "too_soon"}` ; `501` si la collecte n'est pas intégrée au serveur |
-| `POST /api/printers` | `name`, `host` (obligatoires) ; `brand`, `model`, `location`, `user` | `201` fiche créée (`restored: true` si une imprimante archivée de même adresse est remise en service) ; `409` adresse déjà suivie ; `422` champ invalide |
-| `PATCH /api/printers/{id}` | un ou plusieurs champs parmi `name`, `host`, `brand`, `model`, `location`, `user` | `200` fiche à jour ; `404` ; `409` ; `422` |
-| `DELETE /api/printers/{id}` | | `200` `{"archived": true}` (historique conservé) ; `404` |
+| `GET /api/health` | public | `{"ok": true}` |
+| `POST /api/auth/login` | public | `{email, password, remember}` → `{auth, email, role, must_change}` + cookie ; `401`, `429` + `Retry-After` |
+| `POST /api/auth/logout` | session | Révoque le jeton et efface le cookie |
+| `GET /api/auth/me` | public | `{auth, email, role, must_change}` ; `401` sans session ; `{"auth": false}` sans comptes (démo) |
+| (toute autre route) | session provisoire | `403 {"code": "must_change"}` tant que le mot de passe provisoire n'est pas remplacé |
+| `POST /api/auth/password` | session | `{current, new}` ; `403` mot de passe actuel faux, `422` règle non respectée |
+| `GET /api/users` | admin | Comptes (adresse, rôle, provisoire, dates) ; jamais les empreintes |
+| `POST /api/users` | admin | `{email, password, role}` → `201` (mot de passe provisoire) ; `409`, `422` |
+| `PATCH /api/users/{email}/role` | admin | `{role}` ; `409` pour soi-même ou le dernier administrateur |
+| `POST /api/users/{email}/password` | admin | `{password}` (provisoire, sessions du compte fermées) ; `409` pour soi-même |
+| `DELETE /api/users/{email}` | admin | `409` pour soi-même ou le dernier administrateur |
+| `GET /api/audit?limit=100&user=…&action=…&before=…&since=…` | admin | `{entries: [{id, ts, user, action, target, source}], more}` ; `action` est un préfixe |
+| `GET /api/audit.csv?user=…&action=…` | admin | Export Excel (`;`, BOM, cellules commençant par `= + - @` neutralisées) |
 
-Garde-fous communs aux écritures : gestion active (`403` sinon), **même origine web** (`403` si l'en-tête `Origin` ne correspond pas à `Host`), code administrateur en mode `token`
-(`401`), champs bornés (nom 80, adresse 253, emplacement 120, utilisateur 80, marque 40, modèle 60), caractères de contrôle refusés, champs inconnus refusés, adresse
-validée.
+### 12.2 Parc
 
-```bash
-# mode « open » (serveur local)
-curl -s -XPOST localhost:8080/api/printers -H 'Content-Type: application/json' \
-     -d '{"name":"Pool RH","host":"10.0.239.78","user":"Paul MARTIN","location":"BAT A"}'
-curl -s -XPATCH localhost:8080/api/printers/imp-100-10 -H 'Content-Type: application/json' -d '{"user":"Claire FONTAINE"}'
-curl -s -XDELETE localhost:8080/api/printers/imp-100-10
-curl -s -XPOST localhost:8080/api/sync
+| Route | Rôle | Rôle de la route |
+|---|---|---|
+| `GET /api/status` | session | Parc trié par urgence, consommables, fiche matérielle (`info`), pages sur 30 jours, incidents ouverts, synthèse, seuils, santé de la collecte, **capacités** (`sync`, `manage`, `incidents`, `admin`, `role`). L'adresse `host` n'est servie qu'aux rôles `ecriture` et `admin` |
+| `GET /api/events?limit=` | session | Derniers événements (1 à 200) |
+| `GET /api/history/{id}/{clé}?days=` | session | Série `{ts, pct}` d'un consommable |
+| `GET /api/series`, `/api/availability`, `/api/fleet/daily` | session | Séries rééchantillonnées, disponibilité, état quotidien (intégrations) |
+| `POST /api/sync` | ecriture | `202 {"state": "started"\|"running"\|"too_soon"}` ; `501` sans `--collect` |
+| `POST /api/printers` | ecriture | `{name, host, brand, model, location, user}` → `201` (`restored` si remise en service) ; `409` adresse déjà suivie |
+| `PATCH /api/printers/{id}` | ecriture | Champs modifiés seulement ; un changement d'adresse relance un relevé |
+| `DELETE /api/printers/{id}` | ecriture | Archivage (historique conservé) |
+| `GET /api/settings` / `PUT /api/settings` | session / admin | `{warn, crit, inks}` |
 
-# mode « token » : ajouter l'en-tête
-curl -s -XPOST localhost:8080/api/printers -H "X-Admin-Token: $PRINTWATCH_ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{…}'
-```
+### 12.3 Incidents
+
+| Route | Rôle | Corps / réponse |
+|---|---|---|
+| `GET /api/incidents/categories` | session | Liste des catégories |
+| `GET /api/printers/{id}/incidents` | session | Incidents de l'imprimante (ouverts d'abord) |
+| `POST /api/printers/{id}/incidents` | ecriture | `{category, description}` → `201` |
+| `POST /api/incidents/{n}/resolve` | ecriture | `{resolution}` ; `409` si déjà clôturé |
+
+### 12.4 Tickets
+
+| Route | Rôle | Corps / réponse |
+|---|---|---|
+| `GET /api/tickets?limite=60&ouverts=true&intranet=false` | ecriture | `limite` de 1 à 200 (`422` sinon) ; `{tickets: [{id, objet, date, statut, statut_nom, priorite, categorie, depuis_intranet, confie_a, hors_glpi}], total}` ; `503` GLPI non configuré, `502` GLPI en erreur |
+| `POST /api/tickets/{n}/confier` | ecriture | `{technician_id}` → `{ticket, confie_a, hors_glpi}` ; `404` technicien inconnu ou inactif, `409` adresse GLPI introuvable, `502` attribution refusée |
+| `GET /api/technicians?actifs=false` | ecriture | Carnet |
+| `POST /api/technicians` | admin | `{name, glpi_email}` → `201` ; `409` nom déjà pris ; `422` si le nom contient `<`, `>` ou un caractère de contrôle, ou si l'adresse est invalide |
+| `PATCH /api/technicians/{n}` | admin | `{name?, glpi_email?, active?}` (`glpi_email: ""` repasse le technicien hors GLPI) |
 
 ---
 
 ## 13. Modèle de données
 
-SQLite en mode **WAL**. Le schéma est créé et **migré automatiquement** au démarrage (colonnes `user`, `fc_days`, `fc_conf`, table `cycles`). Un consommable que le dernier relevé réussi n'a **pas rafraîchi** (disparu de la table SNMP) est marqué **périmé** par l'API et n'entretient plus aucune alerte.
+SQLite en mode **WAL** ; schéma créé et migré automatiquement au démarrage.
 
-| Table | Contenu | Colonnes principales |
-|---|---|---|
-| `printers` | Une fiche par imprimante | `id`, `name`, `host`, `brand`, `model`, `location`, `user`, `enabled` (0 = archivée), `sys_descr`, `last_seen`, `last_error`, `failures`, `down` |
-| `supplies` | État courant d'un consommable | `printer_id`, `key`, `description`, `kind`, `color`, `status`, `pct`, `level`, `max_capacity`, `alert_level`, `updated_at`, `fc_days`, `fc_conf` (rupture estimée) |
-| `samples` | Historique des niveaux | `printer_id`, `key`, `ts`, `pct` (index sur `printer_id, key, ts`) |
-| `events` | Événements d'alerte | `ts`, `printer_id`, `key`, `type`, `pct`, `message`, `notified` |
-| `cycles` | Un enregistrement par cycle terminé | `ts`, `polled`, `failed`, `events`, `duration` |
+| Table | Contenu |
+|---|---|
+| `printers` | Fiche (id, nom, adresse, marque, modèle, emplacement, utilisateur, `enabled`), dernier relevé, échecs, `down` |
+| `supplies` | État courant d'un consommable (pourcentage, alerte, prévision `fc_days` / `fc_conf`) |
+| `samples` | Historique des niveaux |
+| `events` | Événements d'alerte et leur notification |
+| `device_info` | Fiche matérielle du dernier relevé (JSON) |
+| `counters` | Historique du compteur de pages |
+| `cycles` | Un enregistrement par cycle (santé de la collecte) |
+| `incidents` | Incidents déclarés : catégorie, description, ouverture et clôture (date, auteur, résolution) |
+| `technicians` | Carnet : nom (unique), adresse GLPI facultative, actif |
+| `ticket_assignments` | Une ligne par ticket confié : technicien, écrit dans GLPI ou non, date, auteur |
+| `settings` | Réglages de la page Paramètres (JSON) |
+| `audit` | Journal d'audit : `ts`, `user`, `action`, `target`, `source` (jamais de secret) |
 
-Volumétrie : environ une ligne de `samples` par consommable et par cycle (≈ 90 lignes par cycle pour 21 imprimantes ; ≈ 1,6 million de lignes par an à 30 minutes). La purge
-supprime les relevés, cycles et événements notifiés plus vieux que `retention_days`.
+Hors base : `users.json` (comptes, clé de signature des sessions, empreintes des jetons révoqués) et `.secrets.enc` (coffre). La purge (`retention_days`) touche `samples`, `cycles`, `counters`, `audit` et les `events` notifiés ;
+incidents, techniciens et attributions sont conservés.
 
 ---
 
 ## 14. Sécurité
 
-**Secrets**
-- Les secrets SNMP ne passent **jamais en ligne de commande** : écrits dans un `snmp.conf` temporaire (dossier 0700, fichier 0600) lu via `SNMPCONFPATH`, supprimé à la sortie.
-  Ils viennent de l'environnement, pas du TOML. `.env` ne se versionne pas.
-- Cible : **SNMPv3 `authPriv`** (SHA / AES), compte dédié en lecture seule. v1 et v2c envoient la communauté en clair : usage temporaire.
+**Ce qui est en place**
+- Secrets SNMP jamais en ligne de commande (fichier `snmp.conf` temporaire 0600) ; secrets GLPI dans un **coffre DPAPI** ; mots de passe et secrets saisis au clavier.
+- **Connexion obligatoire** hors démo ; rôles vérifiés côté serveur ; cookie signé, `HttpOnly`, `Secure`, `SameSite=Strict` ; contrôle d'origine sur toutes les écritures (anti-CSRF).
+- **Garde `Host`** (anti « rebinding DNS ») : en écoute locale, seuls `localhost`, `127.0.0.1`, `[::1]` et les noms de `PRINTWATCH_ALLOWED_HOSTS` sont acceptés.
+- En-têtes : CSP stricte (`default-src 'none'`, tout en `'self'`), `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, `Cross-Origin-Resource-Policy: same-origin` ; aucune ressource externe.
+- Lecture de la base en `mode=ro` ; écritures sur des connexions courtes distinctes ; entrées bornées et validées (pydantic, champs inconnus refusés).
+- Blocage après 5 échecs ; durée de réponse identique pour un compte inconnu ; adresse du poste lue dans `X-Forwarded-For` **uniquement** quand le pair est la boucle locale (proxy IIS).
+- Lecture HP (LEDM) : taille et durée bornées, `DOCTYPE`/`ENTITY` refusés, pas de redirection vers un autre hôte.
+- Appels GLPI en HTTPS avec **vérification du certificat** (bibliothèque standard).
 
-**Réseau**
-- Interrogation d'une **liste explicite** d'adresses, **jamais de balayage** de sous-réseau (un scan UDP/161 ressemble à de la reconnaissance pour un SOC). Prévenir le SOC avant le premier cycle.
-- Flux UDP/161 du serveur vers les seules imprimantes, source fixe ; restreindre le SNMP sur chaque imprimante à l'adresse du serveur.
-- `matrix` n'écrit aucune adresse IP : le fichier peut être joint à un compte rendu.
+- **Mot de passe provisoire** aléatoire, et compte provisoire limité au changement de son mot de passe ; **déconnexion** qui révoque le jeton.
+- **Journal d'audit** de toutes les actions sensibles ([§9.4](#94-journal-daudit)).
+- Carnet des techniciens validé (ni HTML ni caractère de contrôle, adresse vérifiée) et nom **échappé** dans le suivi écrit dans GLPI ; liste des tickets bornée à 200.
+- Un compte `lecture` ne reçoit pas les adresses IP des imprimantes.
+- Script Windows : `data\` (base, `users.json` et sa clé de signature) et `.secrets.enc` lisibles des seuls SYSTEM et administrateurs.
 
-**Dashboard**
-- En-têtes sur toutes les réponses : CSP `default-src 'none'` (scripts, polices, images et API en `'self'` uniquement), `X-Frame-Options: DENY`, `nosniff`, `no-referrer`.
-  Polices auto-hébergées, aucun CDN. Textes d'origine SNMP affichés comme texte (jamais interprétés).
-- **Lecture** : connexion SQLite ouverte en `mode=ro`. **Écriture** : routes de gestion dédiées, avec connexion courte distincte.
-- **Gestion des imprimantes** (ajout, édition, retrait) :
-
-| Situation | Mode | Effet |
-|---|---|---|
-| Écoute en local (`127.0.0.1`, défaut) | `open` | Gestion libre |
-| `PRINTWATCH_ADMIN_TOKEN` défini | `token` | Le dashboard demande le code (une fois par onglet, `sessionStorage`) et l'envoie dans `X-Admin-Token` |
-| Écoute hors boucle locale **sans** jeton | `off` | Gestion désactivée (avertissement au démarrage) |
-| `--no-manage` | `off` | Gestion coupée quelle que soit la situation |
-| Base en lecture seule (conteneur, volume monté en `ro`) | `off` | Gestion désactivée |
-
-- Écritures refusées si elles viennent d'une autre origine web (anti-CSRF) ; entrées validées et bornées ; le jeton est comparé en temps constant.
-- **Garde « Host » (anti rebinding DNS)** : en écoute locale, seuls `localhost`, `127.0.0.1` et `[::1]` sont acceptés dans l'en-tête `Host` (les autres reçoivent `400`). Sans elle, une page web malveillante dont le nom pointerait vers `127.0.0.1` atteindrait ce serveur avec une origine cohérente. Derrière un proxy inverse, déclarer le nom public : `PRINTWATCH_ALLOWED_HOSTS=printwatch.exemple.sn`. Hors boucle locale, la garde ne s'active que si cette variable est définie.
-- **Le dashboard n'a pas de comptes utilisateurs ni de TLS.** Pour tout accès réseau : **proxy inverse** (TLS + authentification) devant, restriction par adresse source.
-  Derrière un proxy sur la boucle locale, la gestion est « ouverte » à toute personne authentifiée par le proxy : ajouter un `PRINTWATCH_ADMIN_TOKEN` ou `--no-manage`.
-- Le HTTPS vers les HP (complément LEDM) n'est pas vérifié (certificat auto-signé) : lecture seule, sans identifiants, sur le réseau interne. Les redirections vers un **autre hôte** sont refusées, la taille (256 Ko) et la **durée totale** de la réponse sont bornées, le XML est refusé s'il contient `DOCTYPE` ou `ENTITY`.
+**À connaître**
+- Le coffre DPAPI est en **portée machine** : tout compte ouvert sur le serveur peut le déchiffrer. Il protège contre une copie du fichier, pas contre un accès au serveur.
+- `data\users.json` contient la **clé de signature des sessions** : qui la lit peut fabriquer une session. D'où les droits restreints posés par le script ; les conserver.
+- Compteurs de blocage en mémoire (remis à zéro au redémarrage) ; un tiers peut bloquer un compte 15 minutes en tapant cinq fois son adresse.
+- Le service Windows tourne sous **LocalSystem** (défaut de NSSM).
+- Pas de TLS dans l'application : HTTPS assuré par IIS ou un proxy inverse.
 
 ---
 
 ## 15. Déploiement
 
-### 15.1 Poste de test (PoC)
+### 15.1 Windows Server + IIS (production)
 
-```bash
-printwatch serve --collect -p printers.csv
-```
-
-Un poste portable ou WSL **s'arrête en veille ou à la fermeture de la session** : le bandeau « La collecte est à l'arrêt » le signale. Sous Windows, désactiver la veille sur secteur :
+Service Windows (NSSM) sur `127.0.0.1:8080`, derrière un site IIS en HTTPS (URL Rewrite + ARR, `preserveHostHeader=True`).
 
 ```powershell
-powercfg /change standby-timeout-ac 0
-powercfg /change hibernate-timeout-ac 0
+# 1. Depuis la racine du dépôt
+python -m venv .venv; .\.venv\Scripts\python.exe -m pip install -e ".[web]"
+# config.toml : chemins complets de snmpwalk.exe / snmpget.exe, db_path absolu, section [glpi]
+# printers.csv : le parc ; .env : PRINTWATCH_SNMP_COMMUNITY, PRINTWATCH_ALLOWED_HOSTS=<nom public>
+
+# 2. Valeurs propres au serveur, une fois (fichier NON versionné)
+Copy-Item deploy\windows\site.example.psd1 deploy\windows\site.local.psd1
+notepad deploy\windows\site.local.psd1          # HostName, CertSubject, SiteName, Port, DeployDir
+
+# 3. Premier administrateur, puis les autres comptes
+.\.venv\Scripts\python.exe -m printwatch -c config.toml users add --role admin prenom.nom@exemple.sn
+
+# 4. Secrets GLPI dans le coffre DPAPI de CE serveur (portée machine : lisible par le service)
+.\.venv\Scripts\python.exe -m printwatch -c config.toml secret set GLPI_CLIENT_SECRET GLPI_PASSWORD
+.\.venv\Scripts\python.exe -m printwatch -c config.toml glpi
+
+# 5. net-snmp, service PrintWatch, site IIS, droits, vérifications (s'auto-élève)
+.\deploy\windows\admin-install.ps1                # ou : -HostName printwatch.exemple.sn -CertSubject "CN=*.exemple.sn*"
 ```
 
-### 15.2 VM Linux avec systemd (recommandé)
+`deploy/windows/admin-install.ps1` lit le nom public, le filtre du certificat, le nom du site, le port et le dossier des outils dans ses paramètres
+ou dans `site.local.psd1` (**rien de propre au serveur n'est versionné**). Il vérifie les prérequis (URL Rewrite, ARR, `preserveHostHeader`, certificat et son
+expiration), installe net-snmp, crée le service NSSM (variables de `.env` injectées, journaux tournants, redémarrage automatique), **restreint les droits**
+de `data\` et du coffre aux seuls SYSTEM et administrateurs, génère `iis\web.config` depuis `web.config.template`, crée le site IIS (HTTP → HTTPS, HSTS), puis
+teste `/api/health` (`200`), `/api/status` sans session (`401`), la présence d'un compte et la résolution DNS. `-Uninstall` retire le service et le site.
+
+- **Après le premier passage du script**, `data\` n'est plus lisible que par SYSTEM et les administrateurs : lancer `printwatch users …` et `printwatch audit`
+  depuis un **PowerShell administrateur**.
+- Après toute modification de `.env` : rejouer le script. Après une mise à jour du code ou un changement de secret GLPI : `Restart-Service PrintWatch`.
+- Le service tourne sous **LocalSystem** (défaut de NSSM).
+
+### 15.2 VM Linux avec systemd
 
 ```bash
 sudo useradd --system --home /opt/printwatch printwatch
 sudo install -d -o printwatch /opt/printwatch/data
-python3 -m venv /opt/printwatch/venv && /opt/printwatch/venv/bin/pip install "/chemin/vers/printwatch[web]"
-# copier config.toml, printers.csv (amorçage) et .env (chmod 600) dans /opt/printwatch
-sudo cp deploy/printwatch.service /etc/systemd/system/
-sudo systemctl enable --now printwatch
-journalctl -u printwatch -f
+python3 -m venv /opt/printwatch/venv && /opt/printwatch/venv/bin/pip install "/chemin/vers/le/depot[web]"
+# config.toml, printers.csv et .env (chmod 600) dans /opt/printwatch ; secrets GLPI en variables dans .env
+sudo -u printwatch /opt/printwatch/venv/bin/printwatch -c /opt/printwatch/config.toml users add --role admin prenom.nom@exemple.sn
+sudo cp deploy/printwatch.service /etc/systemd/system/ && sudo systemctl enable --now printwatch
 ```
 
-`deploy/printwatch.service` lance `serve --collect` sur `127.0.0.1:8080`, redémarre le service en cas d'arrêt et applique un durcissement (`NoNewPrivileges`, `ProtectSystem=strict`, écriture limitée à `data/`).
+Le service lance `serve --collect` sur `127.0.0.1:8080` avec durcissement (`NoNewPrivileges`, `ProtectSystem=strict`, écriture limitée à `data/`).
+Placer un proxy inverse HTTPS devant (Caddy, nginx avec `proxy_set_header Host $host;`) et déclarer le nom public dans `PRINTWATCH_ALLOWED_HOSTS`.
 
 ### 15.3 Docker Compose
 
-```bash
-mkdir -p data && sudo chown 10001 data         # utilisateur du conteneur
-docker compose up -d --build
-docker compose logs -f collector web
-```
-
-Deux services :
-
-| Service | Rôle | Particularités |
-|---|---|---|
-| `collector` | Boucle de collecte (`loop`) | Seul à connaître les secrets SNMP et SMTP ; aucun port exposé ; système de fichiers en lecture seule, `cap_drop: ALL`, `no-new-privileges` |
-| `web` | Dashboard (`serve`) | Aucun secret ; port publié sur `127.0.0.1:8080` seulement ; **lecture seule** : pas de bouton Synchroniser (le collecteur est un autre conteneur) |
-
-Pour **modifier les imprimantes depuis le dashboard avec Docker**, décommenter `environment: ["PRINTWATCH_ADMIN_TOKEN"]` dans le service `web` et définir le jeton dans l'environnement de
-`docker compose` (ne pas donner tout `.env` au service web : il contient les secrets SNMP). Le volume `data` doit rester accessible en écriture (mode WAL).
-Dockerfile et `docker-compose.yml` n'ont **pas été exécutés** dans l'environnement de développement : à valider sur la VM.
-
-### 15.4 Proxy inverse (TLS + authentification)
-
-Exemple Caddy (TLS automatique, authentification de base) :
-
-```caddyfile
-printwatch.exemple.sn {
-    basicauth {
-        admin <hash généré par : caddy hash-password>
-    }
-    reverse_proxy 127.0.0.1:8080
-}
-```
-
-nginx : transmettre l'en-tête `Host` d'origine (`proxy_set_header Host $host;`), sinon le contrôle d'origine des écritures refuse les requêtes du navigateur.
-
-**Dans tous les cas**, déclarer le nom public auprès de PrintWatch (`PRINTWATCH_ALLOWED_HOSTS=printwatch.exemple.sn` dans `.env`) : sans cela, la garde « Host » répond `400` aux requêtes transmises par le proxy.
+Deux services : `collector` (boucle de collecte, seul à recevoir `.env`, aucun port) et `web` (tableau de bord publié sur `127.0.0.1:8080`, sans secret SNMP).
+Avec des comptes, la gestion des imprimantes suit les rôles ; le volume `data` doit être inscriptible (base WAL, `users.json`).
+Comptes : `docker compose run --rm web --config /app/config.toml users add --role admin prenom.nom@exemple.sn`.
+Tickets GLPI : passer `GLPI_CLIENT_SECRET` et `GLPI_PASSWORD` au seul service `web` (ligne `environment` commentée dans `docker-compose.yml`).
+Dockerfile et Compose n'ont **pas été exécutés**.
 
 ---
 
-## 16. Exploitation : sauvegarde, mise à jour, diagnostic
-
-### 16.1 Sauvegarde
+## 16. Exploitation
 
 ```bash
-# Copie cohérente de la base (sans arrêter le service)
+# Sauvegarde cohérente sans arrêter le service
 python3 -c "import sqlite3; s=sqlite3.connect('data/printwatch.db'); d=sqlite3.connect('sauvegarde.db'); s.backup(d); d.close()"
-# Liste des imprimantes, lisible et restaurable
-printwatch export -o imprimantes.csv --excel
+cp data/users.json sauvegarde-users.json                   # comptes : à protéger comme un secret
+printwatch export -o imprimantes.csv --excel                # liste lisible et restaurable
+
+# Diagnostic de l'installation (lecture seule)
+python3 tools/diagnostic.py data/printwatch.db printers.csv
 ```
 
-À planifier (cron, tâche planifiée). Restauration : remettre la base, ou `printwatch import -p imprimantes.csv --overwrite` sur une base vide.
-
-### 16.2 Mise à jour
-
-```bash
-# arrêter le service, puis, depuis le dossier du projet :
-rm -rf /tmp/pwnew && mkdir /tmp/pwnew && unzip -q printwatch-vXX.zip -d /tmp/pwnew
-rsync -a --exclude=printers.csv --exclude=config.toml --exclude=.env --exclude=data/ \
-      --exclude=__pycache__ --exclude='*.egg-info' /tmp/pwnew/printwatch/ ./
-pip install -q -e ".[web]" && pytest -q       # tests : tous au vert
-# relancer le service ; vider le cache du navigateur (Ctrl+Maj+R)
-```
-
-`config.toml`, `.env`, `printers.csv` et `data/` ne sont jamais écrasés. Les migrations de base sont automatiques.
-
-### 16.3 Diagnostic de l'installation
-
-```bash
-python3 tools/diagnostic.py [data/printwatch.db] [printers.csv]    # lecture seule
-```
-
-Affiche : taille et mode de la base, âge du dernier cycle et interruptions récentes, état de chaque imprimante (échecs, dernier relevé, niveaux connus), écarts entre CSV et base,
-adresses en double, volume de l'historique, événements non notifiés.
+**Mise à jour** : arrêter le service, remplacer le code sans toucher à `config.toml`, `.env`, `printers.csv`, `data/` ni `.secrets.enc`,
+`pip install -e ".[web]"`, relancer, puis Ctrl+Maj+R dans le navigateur. Les migrations de base sont automatiques.
 
 ---
 
-## 17. Développement
-
-### 17.1 Tests
+## 17. Développement et tests
 
 ```bash
 pip install -e ".[dev]"
-pytest -q            # 152 tests, 93 % de couverture (ou : tools/pwsync / tools\pwsync.ps1 : installation + tests)
-```
+pytest -q                      # 276 tests
 
-| Fichier | Couvre |
-|---|---|
-| `test_snmp.py`, `test_normalize.py` | Format réel de `snmpwalk`, secrets, hôtes, valeurs spéciales, réceptacles |
-| `test_alerts.py`, `test_forecast.py` | Machine à états, hystérésis, prévision |
-| `test_collector.py` | Cycle, injoignabilité, remplacement, complément HP, relance, reprise, battement de cœur |
-| `test_ledm.py` | XML HP réels (`tests/fixtures/`), correspondance, refus d'entités, requête HTTP réelle locale |
-| `test_loop.py` | La boucle survit aux erreurs |
-| `test_review.py` | Correctifs de la revue : prévision persistée, consommables périmés, garde Host, file de synchronisation, CSV, SMTP, purge, durcissement LEDM, commandes de la CLI |
-| `test_csv_formats.py` | Exports Excel : UTF-8/ANSI, `,` `;` tabulation |
-| `test_web.py`, `test_web_series.py`, `test_static.py` | API de lecture, santé de la collecte, en-têtes, build statique |
-| `test_management.py` | Ajout / édition / retrait, jeton, origine, validation, synchronisation, import / export |
-| `test_demo.py`, `test_seed_demo.py` | Mode démo, base de démonstration |
-
-### 17.2 Interface (`frontend/`)
-
-```bash
 cd frontend
-npm ci                  # installe depuis package-lock.json
-npm run dev             # http://localhost:5173, proxy /api → 127.0.0.1:8080 (lancer `printwatch serve` à côté)
-npm run build           # type-check + build vers ../printwatch/static  (à COMMITER)
-npm audit --omit=dev    # avant chaque livraison
+npm ci
+npm run dev                    # http://localhost:5173, proxy /api → 127.0.0.1:8080
+npm run build                  # type-check + build vers ../printwatch/static (à commiter)
+npm audit --omit=dev
 ```
 
-Dépendances d'exécution : React, React DOM, une police auto-hébergée. Le build est **commité** : FastAPI ne sert que des fichiers statiques.
+La CI GitHub (`.github/workflows/ci.yml`) lance les tests sur Python 3.11 et 3.12 et le build du frontend sur Node 22.
 
-| Fichier | Rôle |
+| Fichier de tests | Couvre |
 |---|---|
-| `src/App.tsx` | Page, sondage de l'API, en-tête, bandeaux, synchronisation, panneaux |
-| `src/FleetTable.tsx` | Filtres, recherche, cartes à barres, section « Sans données » |
-| `src/Drawer.tsx`, `src/Tubes.tsx` | Volet de détail et éprouvettes |
-| `src/PrinterForm.tsx`, `src/AddPanel.tsx` | Formulaire d'ajout et d'édition |
-| `src/api.ts` | Types, client d'API, gestion du code administrateur |
-| `src/ui.ts` | Libellés, couleurs, abréviations, routage par fragment d'URL |
-| `src/EventLog.tsx`, `src/Icons.tsx`, `src/useDrawerFocus.ts`, `src/index.css` | Événements, icônes, focus des panneaux, styles |
+| `test_auth.py`, `test_roles.py` | Comptes, scrypt, cookie, blocage, rôles sur chaque route |
+| `test_hardening.py` | Correctifs 0.13 : compte provisoire limité, révocation à la déconnexion, en-têtes sur les refus, IP masquées, carnet validé et échappé, limite des tickets, détection intranet, journal d'audit (actions, filtres, CSV, aucun secret) |
+| `test_tickets.py`, `test_glpi_jeton.py` | Répartition des tickets, carnet, cache et renouvellement du jeton OAuth |
+| `test_settings.py` | Seuils et consommables suivis |
+| `test_device.py` | Fiche matérielle (MIB, décodage des erreurs, MAC) |
+| `test_snmp.py`, `test_normalize.py`, `test_ledm.py` | Lecture SNMP, normalisation, complément HP |
+| `test_alerts.py`, `test_forecast.py`, `test_collector.py`, `test_loop.py` | Alertes, prévision, cycle, boucle |
+| `test_web.py`, `test_web_series.py`, `test_static.py`, `test_management.py`, `test_review.py` | API, en-têtes, gestion des imprimantes, non-régressions |
+| `test_csv_formats.py`, `test_demo.py`, `test_seed_demo.py` | CSV Excel, démo |
 
-### 17.3 Organisation du dépôt
+Le coffre DPAPI (`secrets_vault.py`) n'est pas testé (Windows uniquement).
 
-```
-printwatch/            paquet Python (cœur, API, démo)   frontend/        source React (build → printwatch/static)
-tests/                 152 tests + fixtures HP           docs/            DOSSIER_TECHNIQUE.md (voir note de mise à jour)
-tools/                 sonde, diagnostic, démo, simulateur snmpsim, base de démonstration
-deploy/                service systemd                    scripts/powershell/   audit du parc sous Windows
-```
-
-### 17.4 Outils annexes
-
-| Outil | Usage |
+| Interface | Rôle |
 |---|---|
-| `tools/demo.ps1` | Lance la démonstration sous Windows |
-| `tools/diagnostic.py` | Diagnostic en lecture seule d'une installation |
-| `tools/seed_demo.py` | Génère une base de démonstration avec 30 jours d'historique (`--profile audit` : parc de 18 imprimantes) |
-| `tools/simulator/` | Imprimante virtuelle pour `snmpsim` : valider net-snmp → analyse → normalisation sans imprimante, y compris SNMPv3 |
-| `scripts/powershell/` | `01-Test-Parc.ps1` (ping + SNMP), `02-Export-Toner.ps1` (CSV), `03-Register-DailyTask.ps1` (tâche quotidienne) |
-
-Valider avec le vrai net-snmp, sans imprimante :
-
-```bash
-pip install snmpsim pysmi
-snmpsim-command-responder --data-dir=tools/simulator --agent-udpv4-endpoint=127.0.0.1:1161 &
-printf '[snmp]\nversion = "2c"\n' > config.toml && export PRINTWATCH_SNMP_COMMUNITY=printer-epson
-printwatch probe 127.0.0.1:1161     # attendu : Black 62 %, Cyan 11 %, boîtier 7 % restant (93 % plein)
-```
+| `src/App.tsx` | En-tête, routage, sondage de l'API (60 s), bandeaux |
+| `src/Overview.tsx`, `src/derive.ts`, `src/FleetTable.tsx` | Indicateurs, calculs d'état, tableau du parc |
+| `src/Drawer.tsx`, `src/DeviceDetails.tsx`, `src/Incidents.tsx`, `src/History.tsx` | Volet de détail et ses onglets |
+| `src/Tickets.tsx`, `src/Accounts.tsx`, `src/Settings.tsx`, `src/Wall.tsx`, `src/Login.tsx` | Pages |
+| `src/api.ts`, `src/ui.ts` | Client d'API, libellés, routage par fragment d'URL |
 
 ---
 
@@ -734,53 +656,40 @@ printwatch probe 127.0.0.1:1161     # attendu : Black 62 %, Cyan 11 %, boîtier 
 
 | Symptôme | Cause probable | Action |
 |---|---|---|
-| Bandeau **« Aucune collecte enregistrée »** | Aucun collecteur n'a jamais tourné | Lancer `printwatch serve --collect -p printers.csv` (ou `loop`) |
-| Bandeau **« La collecte est à l'arrêt »** | Processus arrêté, poste en veille, coupure | Relancer ; consulter les journaux ; `tools/diagnostic.py` (interruptions) ; désactiver la veille ; service systemd |
-| Bandeau orange **« Aucune imprimante n'a répondu »** | Réseau, pare-feu, communauté ou identifiants SNMP | `printwatch probe <ip>` depuis le serveur ; vérifier la communauté et l'accès SNMP autorisé |
-| Une imprimante **Injoignable** | Éteinte, déconnectée, IP changée, autre VLAN | `ping` ; lire l'adresse sur le panneau de l'imprimante ; corriger l'adresse (crayon) |
-| `Timeout: No Response` alors que le `ping` répond | SNMP désactivé, mauvaise communauté, liste d'accès, **version** | Activer SNMP ; essayer `version = "1"` (certains Epson) ; vérifier la communauté |
-| « **N non remontés** » sur une HP | Cartouche très basse ou non HP : SNMP répond `-2` | Laisser `hp_ledm = true` ; vérifier `curl -s http://<ip>/DevMgmt/ConsumableConfigDyn.xml` |
-| Modifier `printers.csv` ne change rien | La base fait foi | Modifier depuis le dashboard, ou `printwatch import -p printers.csv --overwrite` |
-| CSV exporté d'Excel illisible | (corrigé) | Les `;` et l'ANSI sont acceptés ; vérifier les noms de colonnes (`id`, `host` au minimum) |
-| Boutons **Ajouter** / crayon absents, ou `403` | Gestion désactivée (serveur exposé sans jeton, `--no-manage`, base en lecture seule) | Définir `PRINTWATCH_ADMIN_TOKEN` ou écouter en local ; voir [§14](#14-sécurité) |
-| `401` à l'enregistrement | Code administrateur incorrect | Saisir de nouveau le code (il est redemandé) |
-| **Synchroniser** absent | Collecte non intégrée au serveur (Docker, `serve` seul) | Utiliser `serve --collect` ; en Docker, le prochain cycle du collecteur suffit |
+| Personne ne peut se connecter | Aucun compte | `printwatch users add --role admin <adresse>` (sans redémarrage) |
+| `PermissionError` / accès refusé sur `data\users.json` (Windows) | Droits restreints par le script d'installation | Lancer la commande depuis un **PowerShell administrateur** |
+| Seul « Mon mot de passe » s'affiche après connexion | Mot de passe provisoire | Le remplacer : le tableau de bord s'ouvre aussitôt |
+| Pas de page Comptes ni Paramètres | Aucun compte `admin` | `printwatch users role admin <adresse>` |
+| Retour à la connexion à chaque rechargement | Site ouvert en HTTP (cookie `Secure`) | Passer par `https://` (ou `http://localhost` en test) |
+| « trop de tentatives » | 5 échecs en 15 min | Attendre ; ou redémarrer le service (compteurs en mémoire) |
+| `400 en-tête Host non autorisé` | Nom d'accès non déclaré | `PRINTWATCH_ALLOWED_HOSTS=<nom>` puis relancer |
+| `403 origine refusée` sur les écritures derrière IIS | ARR réécrit l'en-tête `Host` | `preserveHostHeader=True` |
+| Onglet Tickets : « GLPI n'est pas configuré » (`503`) | Section `[glpi]` incomplète ou secret absent | `printwatch glpi` indique lequel ; poser le secret puis **redémarrer** |
+| Tickets : erreur `502` | GLPI injoignable ou refus | Message de GLPI affiché ; `printwatch glpi` ; vérifier client OAuth, compte de service, certificat |
+| « Aucun compte GLPI ne porte l'adresse… » | Adresse du technicien inconnue de GLPI | Corriger l'adresse, ou la vider pour confier hors GLPI |
+| `secret list` : « Coffre illisible » | Coffre posé sur une autre machine, ou hors Windows | Reposer les secrets sur ce serveur ; sous Linux, utiliser l'environnement |
+| Filtre « déposées depuis l'intranet » vide | Phrase de pied de page différente des marqueurs | Ajuster `[glpi] marqueurs_intranet` (sans accents, minuscules) puis redémarrer |
+| Script d'installation : « nom public ou certificat non renseignés » | Ni paramètres ni `site.local.psd1` | Créer `deploy\windows\site.local.psd1` depuis `site.example.psd1` |
+| Bandeau « La collecte est à l'arrêt » | Service arrêté, poste en veille | Relancer ; `tools/diagnostic.py` |
+| « Aucune imprimante n'a répondu » | Réseau, communauté, version SNMP | `printwatch probe <ip>` depuis le serveur |
+| Onglet Matériel vide | Aucun cycle depuis la mise à jour, ou imprimante qui ne publie pas ces OID | Synchroniser ; certaines valeurs sont simplement omises |
 | Ancien affichage après mise à jour | Cache du navigateur | Ctrl+Maj+R |
-| `snmp.user est obligatoire en SNMPv3` | Configuration par défaut en v3 | Renseigner le compte v3, ou `version = "2c"` / `"1"` pour un test |
-| Les alertes n'arrivent pas par courriel | `smtp.host` vide : les alertes vont dans les journaux | Renseigner `[smtp]` et `PRINTWATCH_SMTP_PASSWORD` |
-| API : `503` base indisponible | La base n'existe pas encore | Lancer un cycle (`once`) ou `serve --collect` |
-| Port 8080 déjà pris | Autre processus | `--port 8081` |
-| `400 en-tête Host non autorisé` | Accès par un nom que la garde anti rebinding DNS ne connaît pas (proxy, nom DNS interne) | Définir `PRINTWATCH_ALLOWED_HOSTS` avec ce nom, puis relancer |
-| Niveau « 0 % » sur une HP | État HP « très bas » (`veryLow`), pas forcément vide | Commander la cartouche ; voir [§10.3](#103-complément-hp-ledm) |
 
 ---
 
-## 19. Limites connues
+## 19. Limites connues et points ouverts
 
-- **Aucune authentification ni TLS dans l'application** : à fournir par un proxy inverse.
-- La valeur lue est celle que l'imprimante publie : certaines marques ne donnent que des paliers (25 / 50 / 75 / 100 %) ou seulement « il en reste » (`-3`). `matrix` sert à le savoir avant de promettre quoi que ce soit.
-- **Complément web limité aux HP** (LEDM) ; pas de repli sur `prtAlertTable` pour les modèles qui ne publient aucun niveau.
-- HP : « 0 % » signifie « très bas » ; deux sources (SNMP et web) peuvent différer de quelques points pour une même cartouche : SNMP prime quand il donne une valeur.
-- SNMPv3 `authPriv` AES : validé avec le simulateur en `authNoPriv` et `authPriv` SHA+DES uniquement ; **AES et le chiffrement sur équipement réel restent à valider**.
-- Dockerfile et `docker-compose.yml` non exécutés dans l'environnement de développement.
-- Le collecteur intégré (`serve --collect`) dépend du processus : une veille ou un arrêt interrompt la collecte (le dashboard le signale).
-- `printwatch once` lancé très rarement (par exemple une fois par jour) neutralise la tolérance de reprise : préférer `loop` ou `serve --collect`.
-- **Revue de code complète** : voir `docs/REVUE_DE_CODE.md` (constats, corrections de la V12, points ouverts).
-- Le dashboard retire une imprimante par **archivage** : pas de suppression définitive depuis l'interface (l'historique est conservé volontairement).
-- Le rendu de l'interface a été conçu sur la base de captures d'écran de l'utilisateur ; aucun test de navigateur automatisé n'est inclus.
-- `docs/DOSSIER_TECHNIQUE.md` décrit encore l'ancienne interface à plusieurs vues ; un bandeau l'indique, la réécriture reste à faire.
+- `entity_id`, `category_id`, `request_type_id` et `type_ticket` sont lus mais **non utilisés** : la liste montre les tickets de toutes les entités accessibles au compte de service.
+- Dockerfile et `docker-compose.yml` non exécutés ; coffre DPAPI et script IIS non couverts par les tests automatiques (Windows).
+- SNMPv3 `authPriv` AES non validé sur équipement réel.
+- `docs/REVUE_DE_CODE.md` et `docs/DOSSIER_TECHNIQUE.md` décrivent des versions antérieures (bandeau en tête de chaque document).
 
 ---
 
-## 20. Historique des versions
+## 20. Historique
 
 | Version | Apports |
 |---|---|
-| **V1 – V5** | Refonte du front : page unique en cartes ; suppression des vues « Vue d'ensemble », « Journal », du tableau et du mode sombre ; imprimantes sans données repliées sous une puce ; volet de détail allégé ; **utilisateur** et abréviations développées (`BAT` → Bâtiment) ; nouvelle liste `printers.csv` avec colonne `user` |
-| **V6** | **Collecte intégrée** (`serve --collect`), battement de cœur (table `cycles`), en-tête « Dernier relevé » exact, bandeaux d'état, **niveaux partiels** signalés |
-| **V7** | **Complément HP** (LEDM) pour les niveaux SNMP inconnus, relance des échecs dans le cycle, tolérance après interruption |
-| **V8** | Audit complet : CSV tolérant aux exports Excel (`;`, ANSI), correctif de documentation, outil `tools/diagnostic.py` |
-| **V9** | **La base fait foi** ; **gestion depuis le dashboard** (ajouter, modifier, retirer) ; bouton **Synchroniser** ; `import` / `export` ; cartes compactes à barres ; sécurité des écritures (origine, jeton) |
-| **V10** | **Mode démonstration** (`serve --demo`) et lanceur Windows `tools/demo.ps1` |
-| **V11** | Cartes **épurées** (pastille d'état, barres sans libellé, une seule ligne secondaire, compteur supprimé) ; version `0.11.0` ; dépendance `pydantic` explicite ; ce README |
-| **V12** | **Revue de code complète** (`docs/REVUE_DE_CODE.md`) : `/api/status` passe de 300 ms – 1 s à 5 ms (prévision calculée par le collecteur) ; consommables « fantômes » marqués périmés ; garde Host anti rebinding DNS ; synchronisation mise en file à l'ajout d'une imprimante ; CSV : `VRAI`/`FAUX`, valeurs invalides et adresses en double refusées ; SMTP 465 et mot de passe obligatoire ; durcissement de la lecture HP ; purge espacée ; `matrix` sur la base ; 152 tests, 93 % de couverture |
+| **0.13.0** | **Sécurité** : mot de passe provisoire aléatoire et compte provisoire limité au changement de mot de passe ; déconnexion qui révoque le jeton ; en-têtes de sécurité sur toutes les réponses ; adresses IP masquées au rôle `lecture` ; carnet des techniciens validé, nom échappé dans les suivis GLPI ; liste des tickets bornée ; droits de `data\` et du coffre restreints par le script Windows. **Journal d'audit** (interface, API, CSV, `printwatch audit`). **Tickets** : détection « déposée depuis l'intranet » insensible aux accents et au HTML, marqueurs réglables. **Interface** : compteur de pages dans l'onglet Matériel, noms entiers sur l'écran mural, fond de connexion neutre. **Dépôt** : aucune donnée propre à l'entreprise (nom d'hôte, certificat et site en paramètres, `web.config` généré, exemples fictifs) ; README réécrit ; 276 tests |
+| **0.12.x** | Comptes et rôles, page Paramètres, incidents, fiche matérielle SNMP, écran mural, répartition des tickets GLPI 11 (OAuth 2.0), coffre DPAPI, déploiement Windows Server + IIS |
+| **0.12.0** | Revue de code complète (`docs/REVUE_DE_CODE.md`) |

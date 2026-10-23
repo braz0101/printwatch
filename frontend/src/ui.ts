@@ -60,12 +60,25 @@ export const shortName = (p: Printer) => p.name
 /** Abréviations développées à l'affichage (noms et emplacements). À compléter ici, sans toucher aux données. */
 const ABBR: Record<string, string> = { BAT: 'Bâtiment', ADM: 'Administration', INSP: 'Inspection', RDC: 'Rez-de-chaussée', APPRO: 'approvisionnement', '1IER': '1er' }
 /** « BAT B RDC » → « Bâtiment B Rez-de-chaussée » ; les sigles de 3 lettres ou moins (ADV, RH, DSI) sont conservés. */
+/** Mots de liaison saisis en majuscules (« CONTRÔLE DE GESTION ») : remis en minuscules, sauf en tête. */
+const STOP: Record<string, string> = { DE: 'de', DU: 'du', DES: 'des', LA: 'la', LE: 'le', LES: 'les', ET: 'et', EN: 'en', AU: 'au', AUX: 'aux', SUR: 'sur', PAR: 'par' }
 export const pretty = (s: string | null | undefined): string =>
-  (s ?? '').replace(/[\p{L}\p{N}]+/gu, (w) => {
+  (s ?? '').replace(/[\p{L}\p{N}]+/gu, (w, offset: number) => {
     const up = w.toUpperCase()
     if (ABBR[up]) return ABBR[up]
+    if (offset > 0 && w === up && STOP[up]) return STOP[up]
     return w.length > 3 && w === up ? w[0] + w.slice(1).toLowerCase() : w
   }).replace(/^\p{Ll}/u, (c) => c.toUpperCase())
+
+/** Modèle lisible : « EPSON WorkForce Pro WF-C5890DWF 24ppm A4 Color MFP » → « Epson WF-C5890DWF » ; « Color LaserJet Pro MFP M479fdn » → « HP M479fdn ». */
+export function shortModel(m: string | null | undefined): string {
+  if (!m) return ''
+  const wf = m.match(/\bWF-[A-Z0-9]+/i)
+  if (wf) return `Epson ${wf[0].toUpperCase()}`
+  const hp = m.match(/\b(M\d{3}[a-z]*)\b/i)
+  if (hp && /laserjet|\bhp\b/i.test(m)) return `HP ${hp[1]}`
+  return m.replace(/\s+\d+\s*ppm.*$/i, '').replace(/\.\s*must order.*$/i, '').trim()
+}
 
 /** Valeur qui monte progressivement vers sa cible (désactivé si l'utilisateur réduit les animations). */
 export function useCountUp(target: number, ms = 800): number {
@@ -97,10 +110,10 @@ export function useMounted(): boolean {
 /* ---------------------------------- navigation par fragment d'URL ----------------------------------
    Une seule page : `#/`. `#/?p=<id>&k=<consommable>` ouvre le tiroir d'une imprimante ; le bouton « retour »
    du navigateur le ferme. Les anciens liens (`#/parc?p=…`, `#/journal`) restent acceptés. */
-const parseHash = (): { printer: string | null; key: string | null } => {
-  const qs = (window.location.hash.replace(/^#/, '') || '/').split('?')[1] ?? ''
+const parseHash = (): { path: string; printer: string | null; key: string | null } => {
+  const [path, qs = ''] = (window.location.hash.replace(/^#/, '') || '/').split('?')
   const q = new URLSearchParams(qs)
-  return { printer: q.get('p'), key: q.get('k') }
+  return { path, printer: q.get('p'), key: q.get('k') }
 }
 export function useRoute() {
   const [r, setR] = useState(parseHash)

@@ -25,7 +25,7 @@ recipients = []                # ex. ["support-it@example.org"]
 
 [collector]
 db_path = "data/printwatch.db"
-interval_s = 1800              # l'encre varie lentement : 30 min suffisent
+interval_s = 1800              # l'encre varie lentement : 30 min suffisent ; 0 = synchronisation manuelle uniquement (serve --collect)
 workers = 8
 down_after = 3                 # échecs consécutifs avant l'alerte « injoignable »
 replacement_jump = 20.0        # une hausse d'au moins 20 points est lue comme un remplacement de cartouche
@@ -33,3 +33,15 @@ retention_days = 400
 hp_ledm = true          # HP : combler les niveaux SNMP « inconnus » via l'interface web
 retry_delay_s = 3.0     # relance unique des imprimantes en échec dans le même cycle (0 = désactivé)
 
+
+[glpi]                         # répartition des tickets d'assistance ; laisser url vide pour désactiver l'onglet
+url = ""                       # ex. "https://glpi.example.org/api.php" — api.php SANS /v2 : la version est ajoutée par le client
+client_id = ""                 # client OAuth 2.0 déclaré dans GLPI (Configuration > Clients API)
+username = ""                  # compte de service GLPI
+entity_id = 0
+request_type_id = 1
+type_ticket = 1                # 1 = incident, 2 = demande
+timeout = 10.0
+# LES DEUX SECRETS NE SONT PAS ICI : GLPI_CLIENT_SECRET et GLPI_PASSWORD vivent dans le
+# coffre DPAPI (`printwatch secret set GLPI_PASSWORD`), lisible du seul compte qui l'a
+# écrit. À défaut, les variables d'environnement de même nom sont lues en second.

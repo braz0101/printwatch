@@ -32,7 +32,7 @@ def test_storage_edit_archive_restore_and_host_change_resets_down(db):
     st = Storage(db)
     st.record_failure("imp-100-15", "timeout")
     st.conn.execute("UPDATE printers SET down=1 WHERE id='imp-100-15'"); st.conn.commit()
-    assert st.update_printer("imp-100-15", location="Bâtiment Social", user="NDIAYE", evil="x") is True     # champ inconnu ignoré
+    assert st.update_printer("imp-100-15", location="Bâtiment Social", user="NOM2", evil="x") is True     # champ inconnu ignoré
     assert st.is_down("imp-100-15")                                       # même adresse : l'état injoignable est conservé
     st.update_printer("imp-100-15", host="198.51.100.29")
     assert not st.is_down("imp-100-15")                                   # nouvelle adresse : on repart de zéro
@@ -52,7 +52,7 @@ def test_management_is_off_by_default_and_status_hides_hosts(db):
     c = client(db)
     assert c.post("/api/printers", json={"name": "X", "host": "10.0.0.1"}).status_code == 403
     st = c.get("/api/status").json()
-    assert st["capabilities"] == {"sync": False, "manage": "off"} and "host" not in st["printers"][0]
+    assert st["capabilities"] == {"sync": False, "manage": "off", "incidents": True, "admin": True, "role": None} and "host" not in st["printers"][0]
 
 
 def test_token_mode(db):

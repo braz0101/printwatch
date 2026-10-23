@@ -19,10 +19,10 @@ services:
     restart: unless-stopped
     command: ["--config", "/app/config.toml", "serve", "--host", "0.0.0.0", "--port", "8080"]
     depends_on: [collector]
-    # Aucun secret SNMP/SMTP : le dashboard ne contacte jamais les imprimantes.
-    # Gestion des imprimantes (ajout / édition / retrait) : lecture seule par défaut. Pour l'activer, décommenter ci-dessous et définir
-    # PRINTWATCH_ADMIN_TOKEN dans l'environnement de `docker compose` (ne jamais mettre .env complet ici : il contient les secrets SNMP).
-    # environment: ["PRINTWATCH_ADMIN_TOKEN", "PRINTWATCH_ALLOWED_HOSTS"]   # ALLOWED_HOSTS : active la garde anti rebinding DNS (inclure localhost, 127.0.0.1)
+    # Aucun secret SNMP/SMTP : le dashboard ne contacte jamais les imprimantes. Connexion obligatoire : comptes dans data/users.json
+    # (docker compose run --rm web --config /app/config.toml users add --temp --role admin prenom.nom@exemple.sn) ; droits par rôle.
+    # Répartition des tickets GLPI : passer GLPI_CLIENT_SECRET et GLPI_PASSWORD au seul service web (le coffre DPAPI est propre à Windows).
+    # environment: ["PRINTWATCH_ALLOWED_HOSTS", "GLPI_CLIENT_SECRET", "GLPI_PASSWORD"]   # ALLOWED_HOSTS : nom public derrière le proxy
     volumes:
       - ./config.toml:/app/config.toml:ro
       # Écriture requise par le mode WAL (fichier -shm). La lecture seule est garantie par le code :

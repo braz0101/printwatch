@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "printwatch"
-version = "0.12.0"
+version = "0.13.0"
 description = "Supervision des consommables d'imprimantes réseau (SNMP, Printer MIB RFC 3805)"
 requires-python = ">=3.11"
 dependencies = []          # bibliothèque standard uniquement ; le binaire net-snmp (snmpwalk) est requis à l'exécution

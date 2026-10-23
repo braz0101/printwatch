@@ -30,6 +30,49 @@ class Thresholds:
         return Level.OK
 
 
+COLORS = ("black", "cyan", "magenta", "yellow")
+SUPPLY_GROUPS = (*COLORS, "box", "other")       # ce que l'on peut suivre : les quatre encres, le boîtier de maintenance, le reste
+
+
+def supply_group(kind: str, color: str | None) -> str:
+    """Groupe de suivi d'un consommable : sa couleur d'encre, `box` (boîtier de maintenance, toner usagé) ou `other`."""
+    if kind == "receptacle":
+        return "box"
+    return color if color in COLORS else "other"
+
+
+@dataclass(frozen=True)
+class AlertSettings:
+    """Réglages modifiables depuis le dashboard : seuils (en % restant) et consommables qui déclenchent des alertes.
+    Un consommable non suivi reste affiché mais ne passe jamais en attention ni en critique."""
+    warn: float = 15.0
+    crit: float = 5.0
+    tracked: frozenset[str] = frozenset(SUPPLY_GROUPS)
+
+    def __post_init__(self) -> None:
+        if not (0 <= self.crit < self.warn <= 100):
+            raise ValueError("seuils invalides : il faut 0 ≤ critique < attention ≤ 100")
+        unknown = set(self.tracked) - set(SUPPLY_GROUPS)
+        if unknown:
+            raise ValueError(f"consommable inconnu : {', '.join(sorted(unknown))}")
+        if not self.tracked:
+            raise ValueError("suivre au moins un consommable")
+
+    def tracks(self, kind: str, color: str | None) -> bool:
+        return supply_group(kind, color) in self.tracked
+
+    def thresholds(self, hysteresis: float = 5.0) -> Thresholds:
+        return Thresholds(self.warn, self.crit, hysteresis)
+
+    def as_dict(self) -> dict:
+        return {"warn": self.warn, "crit": self.crit, "inks": [g for g in SUPPLY_GROUPS if g in self.tracked]}
+
+    @classmethod
+    def from_dict(cls, d: dict, default: "AlertSettings") -> "AlertSettings":
+        return cls(float(d.get("warn", default.warn)), float(d.get("crit", default.crit)),
+                   frozenset(d.get("inks", default.tracked)))
+
+
 def next_level(prev: Level, pct: float, th: Thresholds, replaced: bool = False) -> Level:
     """Nouvel état. Une dégradation est immédiate ; un retour à la normale exige de dépasser le seuil + hystérésis.
 

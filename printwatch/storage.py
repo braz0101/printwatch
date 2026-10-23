@@ -1,10 +1,12 @@
 """Persistance SQLite : état courant, historique des relevés, journal d'événements."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Collection, Iterable
 
+from .alerts import AlertSettings
 from .model import EventType, Printer, Supply
 
 SCHEMA = """
@@ -57,6 +59,17 @@ CREATE TABLE IF NOT EXISTS events (
     notified INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_events_pending ON events (notified, id);
+CREATE TABLE IF NOT EXISTS device_info (     -- fiche matérielle du dernier relevé (JSON produit par device.parse_device)
+    printer_id TEXT PRIMARY KEY REFERENCES printers(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS counters (        -- historique du compteur de pages (volume imprimé par période)
+    printer_id TEXT NOT NULL,
+    ts REAL NOT NULL,
+    pages INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_counters ON counters (printer_id, ts);
 CREATE TABLE IF NOT EXISTS cycles (          -- battement de cœur : un enregistrement par cycle de collecte terminé
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -64,6 +77,58 @@ CREATE TABLE IF NOT EXISTS cycles (          -- battement de cœur : un enregist
     failed INTEGER NOT NULL,
     events INTEGER NOT NULL DEFAULT 0,
     duration REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS incidents (       -- incidents saisis à la main sur une imprimante (historique conservé)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    printer_id TEXT NOT NULL REFERENCES printers(id),
+    category TEXT NOT NULL,
+    description TEXT NOT NULL,
+    opened_at REAL NOT NULL,
+    opened_by TEXT NOT NULL,
+    resolved_at REAL,
+    resolved_by TEXT,
+    resolution TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_incidents ON incidents (printer_id, opened_at);
+CREATE TABLE IF NOT EXISTS technicians (     -- qui peut recevoir un ticket d'assistance
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    -- FACULTATIF, ET C'EST TOUTE LA SUBTILITÉ. L'API de GLPI exige un identifiant
+    -- d'utilisateur pour désigner un acteur : sans compte GLPI, l'attribution ne peut pas
+    -- y être écrite. Elle devient alors un suivi dans la chronologie du ticket, et
+    -- l'attributaire affiché vient de `ticket_assignments`, marqué « hors GLPI ».
+    -- Le cas s'est présenté le 06/10/2026 avec un stagiaire de passage, et il ne se
+    -- contourne pas.
+    glpi_email TEXT,
+    -- PAS DE DATE DE FIN, un simple interrupteur : un carnet qui se vide tout seul à une
+    -- date que personne ne relit se constate trop tard.
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL,
+    created_by TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_technicians_name ON technicians (name);
+CREATE TABLE IF NOT EXISTS ticket_assignments (   -- ce que PrintWatch a confié, et à qui
+    -- UNE LIGNE PAR TICKET : confier de nouveau remplace, il n'y a qu'un attributaire.
+    ticket_id INTEGER PRIMARY KEY,
+    technician_id INTEGER NOT NULL REFERENCES technicians(id),
+    -- Vrai quand l'attribution a pu être écrite dans GLPI. Faux : la ligne ci-dessous est
+    -- alors la SEULE réponse à « qui tient ce ticket ».
+    in_glpi INTEGER NOT NULL DEFAULT 0,
+    assigned_at REAL NOT NULL,
+    assigned_by TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit (           -- journal des actions : qui, quoi, sur quoi, d'où. JAMAIS de mot de passe ni de jeton
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    user TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit (ts);
+CREATE TABLE IF NOT EXISTS settings (        -- réglages modifiés depuis le dashboard (JSON), prioritaires sur config.toml
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -96,6 +161,192 @@ class Storage:
 
     def close(self) -> None:
         self.conn.close()
+
+    # --- réglages ----------------------------------------------------------------------------------------------
+    def alert_settings(self, default: AlertSettings) -> AlertSettings:
+        """Seuils et consommables suivis enregistrés depuis le dashboard ; `default` (config.toml) tant que rien n'a été réglé,
+        ou si la base précède la table des réglages (connexion en lecture seule, pas encore migrée)."""
+        try:
+            row = self.conn.execute("SELECT value FROM settings WHERE key='alerts'").fetchone()
+        except sqlite3.OperationalError:
+            return default
+        if row is None:
+            return default
+        try:
+            return AlertSettings.from_dict(json.loads(row[0]), default)
+        except (ValueError, TypeError):
+            return default
+
+    # --- incidents saisis -------------------------------------------------------------------------------------------
+    _INCIDENT_COLS = "id, printer_id, category, description, opened_at, opened_by, resolved_at, resolved_by, resolution"
+
+    def add_incident(self, printer_id: str, category: str, description: str, ts: float, author: str) -> int:
+        with self.conn:
+            cur = self.conn.execute("INSERT INTO incidents (printer_id, category, description, opened_at, opened_by) VALUES (?, ?, ?, ?, ?)",
+                                    (printer_id, category, description, ts, author))
+        return int(cur.lastrowid)
+
+    def get_incident(self, incident_id: int) -> dict | None:
+        row = self.conn.execute(f"SELECT {self._INCIDENT_COLS} FROM incidents WHERE id=?", (incident_id,)).fetchone()   # noqa: S608
+        return dict(row) if row else None
+
+    def resolve_incident(self, incident_id: int, ts: float, author: str, resolution: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE incidents SET resolved_at=?, resolved_by=?, resolution=? WHERE id=? AND resolved_at IS NULL",
+                              (ts, author, resolution, incident_id))
+
+    def incidents(self, printer_id: str, limit: int = 200) -> list[dict]:
+        """Historique d'une imprimante : incidents ouverts d'abord, puis du plus récent au plus ancien."""
+        rows = self.conn.execute(f"SELECT {self._INCIDENT_COLS} FROM incidents WHERE printer_id=? "      # noqa: S608
+                                 "ORDER BY resolved_at IS NOT NULL, opened_at DESC LIMIT ?", (printer_id, limit))
+        return [dict(r) for r in rows]
+
+    def open_incidents(self) -> dict[str, list[dict]]:
+        """Incidents ouverts, par imprimante (lecture seule tolérée sur une base pas encore migrée)."""
+        try:
+            rows = self.conn.execute(f"SELECT {self._INCIDENT_COLS} FROM incidents WHERE resolved_at IS NULL ORDER BY opened_at")   # noqa: S608
+        except sqlite3.OperationalError:
+            return {}
+        out: dict[str, list[dict]] = {}
+        for r in rows:
+            out.setdefault(r["printer_id"], []).append(dict(r))
+        return out
+
+    # ── Répartition des tickets d'assistance ────────────────────────────────────
+    #
+    # LE CARNET EST TENU À LA MAIN, il n'est pas déduit de GLPI. Il faut pouvoir y
+    # inscrire quelqu'un QUI N'A PAS DE COMPTE GLPI — un stagiaire, un prestataire de
+    # passage — et l'API de GLPI ne connaît que ses propres comptes.
+
+    _TECH_COLS = "id, name, glpi_email, active, created_at, created_by"
+
+    def technicians(self, actifs_seulement: bool = False) -> list[dict]:
+        """Le carnet, par ordre alphabétique.
+
+        LES INACTIFS SONT SERVIS AUSSI, sauf demande contraire : un technicien retiré
+        reste l'attributaire de ses anciens tickets, et la colonne « confié à » doit
+        pouvoir le nommer. Le masquer ferait disparaître un nom sans rien expliquer.
+        """
+        where = " WHERE active=1" if actifs_seulement else ""
+        rows = self.conn.execute(
+            f"SELECT {self._TECH_COLS} FROM technicians{where} ORDER BY name COLLATE NOCASE")  # noqa: S608
+        return [dict(r) for r in rows]
+
+    def technician(self, technician_id: int) -> dict | None:
+        row = self.conn.execute(
+            f"SELECT {self._TECH_COLS} FROM technicians WHERE id=?",                 # noqa: S608
+            (technician_id,)).fetchone()
+        return dict(row) if row else None
+
+    def add_technician(self, name: str, glpi_email: str | None, ts: float,
+                       author: str) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO technicians (name, glpi_email, created_at, created_by) "
+                "VALUES (?, ?, ?, ?)", (name, glpi_email or None, ts, author))
+        return int(cur.lastrowid)
+
+    def update_technician(self, technician_id: int, *, name: str | None = None,
+                          glpi_email: str | None = None,
+                          active: bool | None = None) -> None:
+        """Ne touche QUE ce qui est passé.
+
+        `glpi_email` a trois états, et les confondre coûterait cher : absent (on n'y
+        touche pas), une adresse (on la pose), la chaîne vide (on l'efface, et le
+        technicien repasse « hors GLPI »). D'où la sentinelle plutôt qu'un `or None`.
+        """
+        champs, valeurs = [], []
+        if name is not None:
+            champs.append("name=?")
+            valeurs.append(name)
+        if glpi_email is not None:
+            champs.append("glpi_email=?")
+            valeurs.append(glpi_email or None)
+        if active is not None:
+            champs.append("active=?")
+            valeurs.append(1 if active else 0)
+        if not champs:
+            return
+        valeurs.append(technician_id)
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE technicians SET {', '.join(champs)} WHERE id=?",            # noqa: S608
+                valeurs)
+
+    def assign_ticket(self, ticket_id: int, technician_id: int, in_glpi: bool,
+                      ts: float, author: str) -> None:
+        """Confier, ou re-confier. Un ticket n'a qu'un attributaire."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO ticket_assignments "
+                "  (ticket_id, technician_id, in_glpi, assigned_at, assigned_by) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(ticket_id) DO UPDATE SET "
+                "  technician_id=excluded.technician_id, in_glpi=excluded.in_glpi, "
+                "  assigned_at=excluded.assigned_at, assigned_by=excluded.assigned_by",
+                (int(ticket_id), int(technician_id), 1 if in_glpi else 0, ts, author))
+
+    def assignments(self, ticket_ids=None) -> dict[int, dict]:
+        """`{numéro: {nom, hors_glpi, …}}` pour les tickets demandés, ou pour tous.
+
+        LA JOINTURE EST ICI et non à l'écran : ce qu'on veut afficher est un NOM, et aller
+        le chercher ligne à ligne depuis le front ferait autant de requêtes que de lignes.
+        """
+        sql = ("SELECT a.ticket_id, a.technician_id, a.in_glpi, a.assigned_at, "
+               "       a.assigned_by, t.name, t.glpi_email "
+               "  FROM ticket_assignments a JOIN technicians t ON t.id = a.technician_id")
+        params: tuple = ()
+        if ticket_ids is not None:
+            ids = [int(i) for i in ticket_ids if i]
+            if not ids:
+                return {}
+            sql += f" WHERE a.ticket_id IN ({','.join('?' * len(ids))})"
+            params = tuple(ids)
+        out: dict[int, dict] = {}
+        for r in self.conn.execute(sql, params):
+            out[int(r["ticket_id"])] = {
+                "technician_id": r["technician_id"],
+                "name": r["name"],
+                # « hors GLPI » se déduit, il ne se stocke pas deux fois : c'est
+                # exactement « l'attribution n'a pas pu être écrite dans GLPI ».
+                "hors_glpi": not bool(r["in_glpi"]),
+                "assigned_at": r["assigned_at"],
+                "assigned_by": r["assigned_by"],
+            }
+        return out
+
+    # --- journal d'audit ------------------------------------------------------------------------------------------
+    def audit(self, ts: float, user: str, action: str, target: str = "", source: str = "") -> None:
+        with self.conn:
+            self.conn.execute("INSERT INTO audit (ts, user, action, target, source) VALUES (?, ?, ?, ?, ?)",
+                              (ts, user[:254], action[:40], target[:600], source[:64]))
+
+    def recent_audit(self, limit: int = 100, user: str | None = None, action: str | None = None,
+                     before_id: int | None = None, since: float | None = None) -> list[dict]:
+        """Du plus récent au plus ancien. `action` est un PRÉFIXE (« user » trouve user_add, user_role…)."""
+        where, args = [], []
+        if user:
+            where.append("user = ?"); args.append(user.strip().lower())
+        if action:
+            where.append("action LIKE ? ESCAPE '\\'"); args.append(action.strip().replace("\\", "").replace("%", "").replace("_", "\\_") + "%")
+        if before_id:
+            where.append("id < ?"); args.append(int(before_id))
+        if since is not None:
+            where.append("ts >= ?"); args.append(float(since))
+        sql = "SELECT id, ts, user, action, target, source FROM audit"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC LIMIT ?"
+        try:
+            rows = self.conn.execute(sql, (*args, max(1, min(int(limit), 10000)))).fetchall()
+        except sqlite3.OperationalError:                       # base antérieure au journal, ouverte en lecture seule
+            return []
+        return [dict(r) for r in rows]
+
+    def set_alert_settings(self, s: AlertSettings) -> None:
+        with self.conn:
+            self.conn.execute("INSERT INTO settings (key, value) VALUES ('alerts', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                              (json.dumps(s.as_dict()),))
 
     # --- imprimantes -----------------------------------------------------------------------------------------
     def upsert_printer(self, p: Printer) -> None:
@@ -228,6 +479,40 @@ class Storage:
             args.append(printer_id)
         return self.conn.execute(sql + " ORDER BY printer_id, key, ts", args).fetchall()
 
+    # --- fiche matérielle et compteur de pages -------------------------------------------------------------
+    def set_device_info(self, printer_id: str, info: dict[str, Any], ts: float) -> None:
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO device_info (printer_id, data, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(printer_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at""",
+                (printer_id, json.dumps(info, ensure_ascii=False), ts),
+            )
+            if isinstance(info.get("page_count"), int):
+                self.conn.execute("INSERT INTO counters (printer_id, ts, pages) VALUES (?, ?, ?)",
+                                  (printer_id, ts, info["page_count"]))
+
+    def device_infos(self) -> dict[str, dict[str, Any]]:
+        """{imprimante: fiche + `updated_at`} ; vide sur une base antérieure à la table (ouverte en lecture seule)."""
+        try:
+            rows = self.conn.execute("SELECT printer_id, data, updated_at FROM device_info").fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        return {r["printer_id"]: {**json.loads(r["data"]), "updated_at": r["updated_at"]} for r in rows}
+
+    def pages_since(self, since: float) -> dict[str, int]:
+        """Pages imprimées depuis `since` : dernier compteur moins le premier de la période. Un compteur qui recule
+        (carte remplacée) rend la valeur incalculable : l'imprimante est alors omise."""
+        try:
+            rows = self.conn.execute("SELECT printer_id, pages FROM counters WHERE ts>=? ORDER BY printer_id, ts", (since,)).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        first: dict[str, int] = {}
+        last: dict[str, int] = {}
+        for r in rows:
+            first.setdefault(r["printer_id"], r["pages"])
+            last[r["printer_id"]] = r["pages"]
+        return {pid: last[pid] - first[pid] for pid in first if last[pid] >= first[pid]}
+
     def printers_basic(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT id, name, down, last_seen FROM printers WHERE enabled=1 ORDER BY name"
@@ -263,8 +548,10 @@ class Storage:
     def purge(self, before: float) -> int:
         with self.conn:
             self.conn.execute("DELETE FROM cycles WHERE ts<?", (before,))
+            self.conn.execute("DELETE FROM counters WHERE ts<?", (before,))
             cur = self.conn.execute("DELETE FROM samples WHERE ts<?", (before,))
             self.conn.execute("DELETE FROM events WHERE ts<? AND notified=1", (before,))
+            self.conn.execute("DELETE FROM audit WHERE ts<?", (before,))
         return cur.rowcount
 
     def overview(self) -> list[sqlite3.Row]:

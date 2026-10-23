@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MODÈLE du site IIS : https://__HOSTNAME__ -> PrintWatch (uvicorn) sur 127.0.0.1:__PORT__.
+  deploy/windows/admin-install.ps1 en tire iis/web.config (non versionné) en remplaçant __HOSTNAME__ et __PORT__.
+
+  IIS ne fait que TLS + proxy. Les en-têtes de sécurité (CSP, X-Frame-Options, nosniff, Referrer-Policy)
+  sont posés par PrintWatch lui-même : ne pas les redéfinir ici, un en-tête en double est invalide.
+  Seul HSTS est ajouté, puisque PrintWatch ne sait pas qu'il est servi en HTTPS.
+
+  Prérequis serveur (déjà en place pour l'intranet) : URL Rewrite, ARR avec proxy activé et
+  preserveHostHeader=True. Sans ce dernier, le contrôle d'origine de PrintWatch refuse les écritures.
+-->
+<configuration>
+  <system.webServer>
+
+    <urlCompression doStaticCompression="true" doDynamicCompression="true" />
+
+    <httpProtocol>
+      <customHeaders>
+        <remove name="X-Powered-By" />
+        <remove name="Strict-Transport-Security" />
+        <add name="Strict-Transport-Security" value="max-age=31536000" />
+      </customHeaders>
+    </httpProtocol>
+
+    <rewrite>
+      <rules>
+        <!-- Une seule adresse servie : https://__HOSTNAME__ (HTTP et tout autre nom y sont renvoyés). -->
+        <rule name="Canonical HTTPS host" stopProcessing="true">
+          <match url=".*" />
+          <conditions logicalGrouping="MatchAny">
+            <add input="{HTTPS}" pattern="off" />
+            <add input="{HTTP_HOST}" pattern="^__HOSTNAME_RE__(:\d+)?$" negate="true" />
+          </conditions>
+          <action type="Redirect" url="https://__HOSTNAME__{URL}" redirectType="Permanent" appendQueryString="true" />
+        </rule>
+
+        <rule name="Proxy to PrintWatch" stopProcessing="true">
+          <match url="(.*)" />
+          <action type="Rewrite" url="http://127.0.0.1:__PORT__/{R:1}" />
+        </rule>
+      </rules>
+
+      <outboundRules>
+        <!-- Redirections émises par l'application (http://…) ramenées en https. -->
+        <rule name="Rewrite Location header" preCondition="IsRedirect">
+          <match serverVariable="RESPONSE_Location" pattern="^http://(127\.0\.0\.1:__PORT__|__HOSTNAME_RE__)(.*)" />
+          <action type="Rewrite" value="https://__HOSTNAME__{R:2}" />
+        </rule>
+        <preConditions>
+          <preCondition name="IsRedirect">
+            <add input="{RESPONSE_STATUS}" pattern="3\d\d" />
+          </preCondition>
+        </preConditions>
+      </outboundRules>
+    </rewrite>
+
+    <defaultDocument enabled="false" />
+    <directoryBrowse enabled="false" />
+
+  </system.webServer>
+</configuration>

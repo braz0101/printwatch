@@ -32,7 +32,7 @@ def test_status_sorted_by_urgency_and_summary(db):
     assert (cyan["pct"], cyan["alert"]) == (11, "WARN")
     assert data["summary"] == {"printers": 2, "down": 1, "crit": 0, "warn": 1, "ok": 0, "nodata": 0}
     assert [p["state"] for p in data["printers"]] == ["down", "WARN"]
-    assert data["thresholds"] == {"warn": 15.0, "crit": 5.0}
+    assert data["thresholds"] == {"warn": 15.0, "crit": 5.0, "inks": ["black", "cyan", "magenta", "yellow", "box", "other"]}
 
 
 def test_history_events_and_index(db):
@@ -132,3 +132,13 @@ def test_collector_health_states(db):
     st.record_cycle(base + 1800, polled=2, failed=2, events=0, duration=12.0)
     st.close()
     assert state(base + 1900)["state"] == "all_failed"            # il tourne, mais plus aucune imprimante ne répond
+
+
+def test_manual_sync_mode_is_never_stale(db):
+    """interval_s = 0 : relevés à la demande ; un dernier relevé ancien n'est pas une collecte « à l'arrêt »."""
+    from printwatch.storage import Storage as S
+    st = S(db)
+    st.record_cycle(1_900_000_000.0, polled=2, failed=0, events=0, duration=3.0)
+    st.close()
+    col = TestClient(create_app(db, interval_s=0, clock=lambda: 1_900_000_000.0 + 5 * 86400)).get("/api/status").json()["collector"]
+    assert col["state"] == "ok" and col["interval_s"] == 0

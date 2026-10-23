@@ -93,7 +93,7 @@ class SmtpConfig:
 @dataclass
 class CollectorConfig:
     db_path: str = "printwatch.db"
-    interval_s: int = 1800
+    interval_s: int = 1800                # 0 = aucun cycle automatique : relevés uniquement à la demande (bouton Synchroniser)
     workers: int = 8
     down_after: int = 3                   # relevés consécutifs en échec avant l'alerte « injoignable »
     replacement_jump: float = 20.0        # hausse (points %) interprétée comme un remplacement
@@ -102,10 +102,90 @@ class CollectorConfig:
     retry_delay_s: float = 3.0            # relance une fois, dans le même cycle, les imprimantes en échec (0 = désactivé)
 
     def validate(self) -> None:
-        if self.interval_s < 10 or self.workers < 1 or self.down_after < 1:
+        if (self.interval_s != 0 and self.interval_s < 10) or self.workers < 1 or self.down_after < 1:
             raise ConfigError("collector.interval_s / workers / down_after invalides")
         if self.replacement_jump <= 0 or self.retention_days < 1:
             raise ConfigError("collector.replacement_jump / retention_days invalides")
+
+
+@dataclass
+class GlpiConfig:
+    """Le lien vers GLPI : les réglages ici, les deux secrets dans le coffre.
+
+    PRINTWATCH DEVIENT L'OUTIL DU SERVICE INFORMATIQUE. Les tickets se
+    répartissaient depuis l'intranet, qui est l'outil de tout le personnel ; ils se gèrent
+    désormais ici, où seules les personnes du service ont un compte. Déposer une demande
+    reste sur l'intranet — c'est là que sont les agents.
+
+    `url` POINTE SUR `api.php`, SANS `/v2`. GLPI 11 a remplacé l'ancienne API
+    (`apirest.php`, jetons `App-Token`) par une API versionnée sous `api.php`, en OAuth 2.0.
+    L'ancienne peut être désactivée côté serveur ; elle n'est pas utilisée.
+
+    LES IDENTIFIANTS NUMÉRIQUES NE VALENT QUE POUR CE SERVEUR. `entity_id`, `category_id`
+    et les deux types sont des clés de VOTRE base GLPI ; une autre installation en
+    aurait d'autres. C'est pourquoi ils sont en configuration et non en dur.
+    """
+
+    url: str = ""                          # .../api.php, sans /v2
+    client_id: str = ""
+    username: str = ""
+    entity_id: int | None = None
+    category_id: int | None = None
+    request_type_id: int | None = None
+    type_ticket: int = 1                   # 1 = incident
+    timeout: float = 10.0
+    # Fragments qui signent une demande déposée depuis l'intranet (TOUS exigés), comparés sur un texte
+    # sans accents ni entités HTML : écrire ici la phrase de pied de page de VOTRE intranet, en minuscules sans accents.
+    marqueurs_intranet: list[str] = field(default_factory=lambda: ["deposee depuis", "intranet"])
+    # LES DEUX SEULS SECRETS, et ils ne sont PAS dans ce fichier. Les noms ci-dessous sont
+    # ceux des clés du coffre DPAPI (`printwatch/secrets_vault.py`) ; à défaut, une
+    # variable d'environnement du même nom est acceptée — c'est ce qui permet de tester
+    # sans coffre, et de dépanner un service qui ne démarre pas.
+    client_secret_key: str = "GLPI_CLIENT_SECRET"
+    password_key: str = "GLPI_PASSWORD"
+
+    def est_configure(self) -> bool:
+        """Les trois réglages sans lesquels aucun appel n'a de sens.
+
+        ON NE LÈVE PAS QUAND C'EST VIDE : une installation de PrintWatch qui ne gère pas
+        de tickets est parfaitement valable, et elle ne doit pas refuser de démarrer pour
+        une section qu'elle n'utilise pas. C'est l'appelant qui décide quoi en faire.
+        """
+        return bool(self.url and self.client_id and self.username)
+
+    def validate(self) -> None:
+        if not self.est_configure():
+            return
+        if not self.url.startswith(("http://", "https://")):
+            raise ConfigError("glpi.url doit commencer par http:// ou https://")
+        if self.url.rstrip("/").endswith("/v2"):
+            raise ConfigError("glpi.url pointe sur api.php, sans /v2 : la version est "
+                              "ajoutée par le client")
+        if self.timeout <= 0:
+            raise ConfigError("glpi.timeout doit être positif")
+        if not self.marqueurs_intranet or not all(isinstance(m, str) and m.strip() for m in self.marqueurs_intranet):
+            raise ConfigError("glpi.marqueurs_intranet : au moins un fragment non vide")
+
+    def secrets(self) -> dict[str, str]:
+        """Le coffre d'abord, l'environnement ensuite.
+
+        L'ORDRE COMPTE, et il est l'inverse de celui du coffre de l'intranet. Ici le
+        coffre est la source normale ; l'environnement n'est qu'une porte de secours pour
+        un essai ou un dépannage. Le prendre en premier ferait qu'une variable oubliée
+        dans un terminal l'emporterait sur le coffre, sans que rien ne le dise.
+        """
+        from . import secrets_vault
+
+        out: dict[str, str] = {}
+        for nom, cle in (("client_secret", self.client_secret_key),
+                         ("password", self.password_key)):
+            valeur = secrets_vault.get_secret(cle) or os.environ.get(cle, "")
+            if not valeur:
+                raise ConfigError(
+                    f"secret {cle} absent : ni dans le coffre "
+                    f"({secrets_vault.vault_path()}), ni dans l'environnement")
+            out[nom] = valeur
+        return out
 
 
 @dataclass
@@ -114,6 +194,7 @@ class AppConfig:
     thresholds: Thresholds = field(default_factory=Thresholds)
     smtp: SmtpConfig = field(default_factory=SmtpConfig)
     collector: CollectorConfig = field(default_factory=CollectorConfig)
+    glpi: GlpiConfig = field(default_factory=GlpiConfig)
 
 
 def _build(cls: type, data: dict[str, Any], section: str):
@@ -137,7 +218,7 @@ def load_config(path: str | Path | None) -> AppConfig:
             raise ConfigError(f"fichier de configuration introuvable : {p}")
         with p.open("rb") as fh:
             raw = tomllib.load(fh)
-        unknown = set(raw) - {"snmp", "thresholds", "smtp", "collector"}
+        unknown = set(raw) - {"snmp", "thresholds", "smtp", "collector", "glpi"}
         if unknown:
             raise ConfigError(f"section(s) inconnue(s) : {', '.join(sorted(unknown))}")
         cfg = AppConfig(
@@ -145,9 +226,11 @@ def load_config(path: str | Path | None) -> AppConfig:
             thresholds=_build(Thresholds, raw.get("thresholds", {}), "thresholds"),
             smtp=_build(SmtpConfig, raw.get("smtp", {}), "smtp"),
             collector=_build(CollectorConfig, raw.get("collector", {}), "collector"),
+            glpi=_build(GlpiConfig, raw.get("glpi", {}), "glpi"),
         )
     cfg.snmp.validate()
     cfg.collector.validate()
+    cfg.glpi.validate()
     return cfg
 
 

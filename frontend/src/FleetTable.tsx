@@ -1,149 +1,186 @@
-import { useMemo, useState, type CSSProperties } from 'react'
-import type { Printer, State, Status, Supply } from './api'
-import { IconDown, IconPlus, IconSearch, IconWarn, STATE_ICON } from './Icons'
-import { ALERT_COLOR, STATE_META, STATE_RANK, ago, alertText, inkColor, inkRank, isBox, isPresentOnly, lowestSupply, pretty, shownLevel, supplyName } from './ui'
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import type { Printer, Status, Supply } from './api'
+import { DEFAULT_FILTER, type Filter, type GroupBy, type Kind, INK_LETTER, inFilter, issuesOf, INK_ORDER, KIND_LABEL, KIND_PLURAL, download, etaOf, fmtDays, groupKey, kindOf, placeOf, sortByUrgency, toCsv } from './derive'
+import { IconDownload, IconPlus, KIND_ICON } from './Icons'
+import { DAY, INK_LABEL, ago, fmtDate, isBox, pretty } from './ui'
 
 interface Props {
-  status: Status; filter: State | null; onFilter: (s: State | null) => void
-  onOpen: (printer: string) => void
-  /** Affiche le bouton « Ajouter une imprimante » (gestion activée côté serveur). */
-  onAdd?: () => void
+  status: Status; query: string; filter: Filter | null; onFilter: (k: Filter | null) => void
+  onOpen: (id: string) => void; onAdd?: () => void
 }
 
-const CHIPS: State[] = ['CRIT', 'WARN', 'OK']
+const CHIPS: Kind[] = ['CRIT', 'INC', 'WARN', 'DOWN', 'OK']
 
-const isUnknown = (s: Supply) => s.kind === 'consumable' && s.pct == null && !isPresentOnly(s)
-const isKnown = (s: Supply) => !s.stale && (s.pct != null || isPresentOnly(s))
-/** Aucune donnée exploitable : imprimante injoignable, jamais relevée, ou aucun niveau remonté. */
-const hasNoData = (p: Printer) => p.down || !p.supplies.some(isKnown)
-/** Données partielles : au moins un niveau remonte, mais d'autres consommables restent inconnus. */
-const isPartial = (p: Printer) => !hasNoData(p) && p.supplies.some(isUnknown)
-/** Masquée par défaut : pas de données ou données partielles, sauf si une alerte est en cours (on ne cache jamais une alerte). */
-const isHidden = (p: Printer) => (hasNoData(p) || isPartial(p)) && p.state !== 'CRIT' && p.state !== 'WARN'
-
-/** État en simple pastille (icône + couleur) : le libellé reste disponible au survol et pour les lecteurs d'écran. */
-function StateDot({ state }: { state: State }) {
-  const m = STATE_META[state], I = STATE_ICON[state]
-  return <span role="img" aria-label={m.label} title={m.label} className="state-dot" style={{ color: m.text, background: `color-mix(in srgb, ${m.color} 14%, transparent)` }}><I width={15} height={15} /></span>
+export function KindChip({ k }: { k: Kind }) {
+  const I = KIND_ICON[k]
+  return <span className="chip" data-k={k}><I width={13} height={13} strokeWidth={2.4} />{KIND_LABEL[k]}</span>
 }
 
-const compactText = (s: Supply) => (isPresentOnly(s) ? 'Présente' : shownLevel(s) == null ? '—' : `${Math.round(shownLevel(s) as number)} %`)
+const valClass = (s: Supply) => (s.alert === 'CRIT' ? 'v-crit' : s.alert === 'WARN' ? 'v-warn' : '')
+const inks = (p: Printer) => INK_ORDER.map((c) => p.supplies.find((s) => s.color === c && !isBox(s) && !s.stale)).filter((s): s is Supply => !!s)
 
-/** Niveaux en barres colorées + pourcentage, sans libellé : la couleur de l'encre l'identifie (le nom reste au survol). */
-function Bars({ p }: { p: Printer }) {
-  const rows = p.supplies.filter((s) => !isUnknown(s)).sort((a, b) => inkRank(a) - inkRank(b) || (a.pct ?? 0) - (b.pct ?? 0))
+function Inks({ p }: { p: Printer }) {
+  const list = inks(p)
+  if (!list.length) return <span className="faint" style={{ fontSize: 12.5 }}>Niveaux non remontés</span>
   return (
-    <ul className="grid grid-cols-2 gap-x-5 gap-y-2">
-      {rows.map((s) => {
-        const present = isPresentOnly(s), crit = !s.stale && s.alert === 'CRIT'
+    <span className="inks">
+      {list.map((s) => {
+        const txt = s.pct == null ? (s.status === 'some_remaining' ? 'présente' : 'inconnu') : `${Math.round(s.pct)} %`
         return (
-          <li key={s.key} className="flex items-center gap-2 text-[12.5px]" title={`${supplyName(s)} : ${compactText(s)}${s.stale ? ' (valeur périmée)' : ''}`}>
-            {(isBox(s) || !s.color) && <span className="muted shrink-0 text-[11px]">{isBox(s) ? 'Récup.' : supplyName(s)}</span>}
-            {present ? <span className="flex-1" /> : <span className={`minibar ${crit ? 'crit' : ''}`} style={{ '--c': s.stale ? 'var(--down)' : isBox(s) ? ALERT_COLOR[s.alert] : inkColor(s.color) } as CSSProperties}><i style={{ width: `${shownLevel(s) ?? 0}%` }} /></span>}
-            <b className="w-[34px] shrink-0 text-right font-semibold tabular-nums" style={{ color: s.stale ? 'var(--muted)' : alertText(s.alert) }}>{compactText(s)}</b>
-          </li>
+          <span key={s.key} className="ink" title={`${INK_LABEL[s.color!]} : ${txt}${s.tracked === false ? ' (non suivie : aucune alerte)' : ''}`}>
+            <span className="ink-l">{INK_LETTER[s.color!]}</span>
+            {s.pct == null ? <span className="faint" style={{ width: 60, fontSize: 12 }}>{txt}</span> : <>
+              <span className="minibar"><i style={{ width: `${s.pct}%`, '--c': `var(--ink-${s.color})` } as React.CSSProperties} /></span>
+              <span className={`ink-v ${valClass(s)}`}>{Math.round(s.pct)}</span>
+            </>}
+          </span>
         )
       })}
-    </ul>
+    </span>
   )
 }
 
-/** Parc : une carte par imprimante, triées par urgence. Les imprimantes sans données sont repliées derrière un bouton. */
-export default function FleetTable({ status, filter, onFilter, onOpen, onAdd }: Props) {
-  const [q, setQ] = useState('')
-  const [open, setOpen] = useState(false)
-  const needle = q.trim().toLowerCase()
-  const match = (p: Printer) => !needle || [p.name, pretty(p.name), p.location, pretty(p.location), p.user, p.model, p.brand, p.id].some((x) => x?.toLowerCase().includes(needle))
-  const hiddenAll = useMemo(() => status.printers.filter(isHidden), [status])
-  const hiddenItems = useMemo(() => hiddenAll.filter(match).sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || a.name.localeCompare(b.name, 'fr')),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hiddenAll, needle])
-  const pool = useMemo(() => status.printers.filter((p) => !isHidden(p)), [status])
-  const items = useMemo(() => {
-    const num = (a: number | null, b: number | null) => (a == null ? (b == null ? 0 : 1) : b == null ? -1 : a - b)   // valeurs absentes en dernier
-    return pool
-      .filter((p) => (!filter || p.state === filter) && match(p))
-      .map((p) => ({ p, low: lowestSupply(p) }))
-      .sort((a, b) => STATE_RANK[a.p.state] - STATE_RANK[b.p.state] || num(a.low?.pct ?? null, b.low?.pct ?? null) || a.p.name.localeCompare(b.p.name, 'fr'))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pool, filter, needle])
+function downText(p: Printer, now: number) {
+  if (!p.last_seen) return 'Jamais relevée'
+  const d = now - p.last_seen
+  return `Sans réponse depuis ${d < DAY ? `${Math.max(1, Math.round(d / 3600))} h` : `${Math.round(d / DAY)} j`}`
+}
 
-  const counts = useMemo(() => {
-    const c: Record<State, number> = { CRIT: 0, WARN: 0, down: 0, OK: 0, NODATA: 0 }
-    for (const p of pool) c[p.state]++
-    return c
-  }, [pool])
+function boxCell(p: Printer) {
+  const b = p.supplies.find((s) => isBox(s) && !s.stale)
+  if (!b || b.pct == null) return <span className="faint">—</span>
+  return <span className={b.alert === 'CRIT' ? 'v-crit' : b.alert === 'WARN' ? 'v-warn' : ''}>{Math.round(100 - b.pct)} %</span>
+}
+
+function etaCell(p: Printer, k: Kind) {
+  if (k === 'DOWN') return <span className="faint">—</span>
+  const e = etaOf(p)
+  if (e == null) return <span className="faint">—</span>
+  return <span className={e <= 7 ? 'v-crit' : e <= 14 ? 'v-warn' : 'muted'}>{fmtDays(e)}</span>
+}
+
+function useNarrow(px = 820) {
+  const q = `(max-width: ${px}px)`
+  const [n, setN] = useState(() => window.matchMedia?.(q).matches ?? false)
+  useEffect(() => { const m = window.matchMedia(q); const f = () => setN(m.matches); m.addEventListener('change', f); return () => m.removeEventListener('change', f) }, [q])
+  return n
+}
+
+/** Le parc : tableau trié par urgence (cartes sur téléphone). Les imprimantes injoignables restent visibles, grisées. */
+export default function FleetTable({ status, query, filter, onFilter, onOpen, onAdd }: Props) {
+  const [group, setGroup] = useState<GroupBy>('none')
+  const narrow = useNarrow()
+  const now = status.generated_at
+  const showIp = status.printers.some((p) => p.host)
+  const showBox = status.printers.some((p) => p.supplies.some(isBox))     // colonne masquée si aucun modèle du parc n'en remonte
+  const cols = 5 + (showIp ? 1 : 0) + (showBox ? 1 : 0)
+  const needle = query.trim().toLowerCase()
+  const match = (p: Printer) => !needle || [p.name, pretty(p.name), p.location, pretty(p.location), p.user, p.model, p.brand, p.id, p.host,
+    p.info?.serial, p.info?.mac, p.info?.sys_name, p.info?.model].some((x) => x?.toLowerCase().includes(needle))
+
+  const all = useMemo(() => [...status.printers].sort(sortByUrgency), [status])
+  const counts = useMemo(() => { const c: Record<Kind, number> = { CRIT: 0, INC: 0, WARN: 0, OK: 0, DOWN: 0, NODATA: 0 }; for (const p of all) c[kindOf(p)]++; return c }, [all])
+  const count = (k: Kind) => counts[k] + (k === 'DOWN' ? counts.NODATA : 0)        // « sans relevé » rangé avec les injoignables
+  const rows = all.filter((p) => inFilter(p, filter) && match(p))
+  const alerts = counts.CRIT + counts.INC + counts.WARN
+  const groups = useMemo(() => {
+    if (group === 'none') return [{ name: '', items: rows }]
+    const m = new Map<string, Printer[]>()
+    for (const p of rows) { const g = groupKey(p, group); m.set(g, [...(m.get(g) ?? []), p]) }
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0], 'fr')).map(([name, items]) => ({ name, items }))
+  }, [rows, group])
+
+  const exportCsv = () => download(`printwatch-parc-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows))
 
   return (
-    <section aria-label="Imprimantes">
-      <div className="mb-3 flex flex-wrap items-center gap-3">
-        <label className="relative block w-full max-w-xs">
-          <IconSearch className="faint pointer-events-none absolute left-3 top-1/2 -translate-y-1/2" width={16} height={16} />
-          <input value={q} onChange={(e) => setQ(e.target.value)} type="search" placeholder="Rechercher" aria-label="Rechercher une imprimante" className="search" />
-        </label>
-        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filtrer par état">
-          <button type="button" className="chip-btn" aria-pressed={!filter} onClick={() => onFilter(null)}>Toutes <span className="chip-n">{pool.length}</span></button>
-          {CHIPS.filter((s) => counts[s] > 0 || filter === s).map((s) => {
-            const I = STATE_ICON[s]
-            return <button key={s} type="button" className="chip-btn inline-flex items-center gap-1.5" aria-pressed={filter === s} onClick={() => onFilter(filter === s ? null : s)}>
-              <I width={13} height={13} style={{ color: filter === s ? undefined : STATE_META[s].text }} />{STATE_META[s].plural}<span className="chip-n">{counts[s]}</span></button>
-          })}
+    <section aria-labelledby="fleet-t" className="panel" style={{ overflow: 'hidden' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '12px 16px', padding: '14px 20px', borderBottom: '1px solid var(--line)' }}>
+        <h2 id="fleet-t" className="h2" style={{ marginRight: 8 }}>Parc</h2>
+        <div role="group" aria-label="Filtrer par état" style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+          <button type="button" className="seg" aria-pressed={filter === 'ALERT'} onClick={() => onFilter('ALERT')}
+            title="Imprimantes en état critique, en attention ou avec un incident matériel">Critiques et attention <span className="seg-n">{alerts}</span></button>
+          <button type="button" className="seg" aria-pressed={!filter} onClick={() => onFilter(null)}>Toutes <span className="seg-n">{all.length}</span></button>
+          {CHIPS.filter((k) => count(k) > 0 || filter === k).map((k) => (
+            <button key={k} type="button" className="seg" aria-pressed={filter === k} onClick={() => onFilter(filter === k ? DEFAULT_FILTER : k)}>
+              {KIND_PLURAL[k]} <span className="seg-n">{count(k)}</span></button>
+          ))}
         </div>
-        {onAdd && <button type="button" className="btn btn-primary ml-auto" onClick={onAdd} title="Ajouter une imprimante" aria-label="Ajouter une imprimante"><IconPlus width={15} height={15} />Ajouter</button>}
+        <div className="no-print" style={{ marginLeft: 'auto', display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--text-2)' }}>Grouper
+            <select className="select" value={group} onChange={(e) => setGroup(e.target.value as GroupBy)}>
+              <option value="none">Aucun</option><option value="location">Emplacement</option><option value="model">Modèle</option>
+              {showIp && <option value="subnet">Sous-réseau</option>}
+            </select>
+          </label>
+          <button type="button" className="btn" onClick={exportCsv} title="Exporter les imprimantes affichées (CSV, ouvrable dans Excel)"><IconDownload width={15} height={15} />Exporter</button>
+          {onAdd && <button type="button" className="btn btn-primary" onClick={onAdd}><IconPlus width={15} height={15} strokeWidth={2.2} />Ajouter une imprimante</button>}
+        </div>
       </div>
-      {(filter || q) && <p className="muted mb-2 text-[13px]" aria-live="polite">{items.length} résultat{items.length > 1 ? 's' : ''}
-        <button type="button" className="link ml-3" onClick={() => { onFilter(null); setQ('') }}>Tout afficher</button></p>}
 
-      {!items.length ? (hiddenItems.length && !filter ? null : <p className="muted panel py-16 text-center">Aucune imprimante ne correspond à ces critères.</p>)
-        : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(270px,1fr))] gap-3">
-            {items.map((it, i) => {
-              const { p } = it
-              const unknown = p.supplies.filter(isUnknown)
-              return (
-                <article key={p.id} className="panel card rise cursor-pointer p-3" style={{ '--delay': `${Math.min(i, 10) * 25}ms` } as CSSProperties}
-                  aria-label={`${pretty(p.name)}, ${STATE_META[p.state].label}`} onClick={() => onOpen(p.id)}>
-                  <header className="mb-3 flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <h3 className="truncate text-[15px] font-semibold leading-tight tracking-tight"><button type="button" className="row-link" onClick={(e) => { e.stopPropagation(); onOpen(p.id) }}>{pretty(p.name)}</button></h3>
-                      {(p.user || p.location) && <p className="muted mt-0.5 truncate text-[12.5px]" title={[p.user, pretty(p.location), p.model].filter(Boolean).join(' · ')}>{[p.user, pretty(p.location)].filter(Boolean).join(' · ')}</p>}
-                    </div>
-                    <StateDot state={p.state} />
-                  </header>
-                  <Bars p={p} />
-                  {unknown.length > 0 && (
-                    <p className="mt-2.5 flex items-center gap-1 text-[12px]" style={{ color: 'var(--warn)' }} title={`Niveaux non remontés par l'imprimante : ${unknown.map(supplyName).join(', ')}. Aucune alerte n'est possible dessus.`}>
-                      <IconWarn width={12} height={12} className="shrink-0" />{unknown.length} non remonté{unknown.length > 1 ? 's' : ''}
-                    </p>
-                  )}
-                </article>
-              )
-            })}
-          </div>
-        )}
-
-      {hiddenItems.length > 0 && !filter && (
-        <div className="mt-6 flex flex-col items-center gap-4">
-          <button type="button" className="chip-btn inline-flex items-center gap-2" aria-label="Afficher ou masquer les imprimantes sans données" aria-expanded={open || !!needle} aria-controls="sans-donnees" onClick={() => setOpen((v) => !v)}>
-            <IconDown width={14} height={14} />
-            Sans données<span className="chip-n">{hiddenItems.length}</span>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: open || needle ? 'rotate(180deg)' : undefined, transition: 'transform .2s' }}><path d="m6 9 6 6 6-6" /></svg>
-          </button>
-          {(open || !!needle) && (
-            <ul id="sans-donnees" className="grid w-full grid-cols-[repeat(auto-fill,minmax(270px,1fr))] gap-3">
-              {hiddenItems.map((p) => (
-                <li key={p.id} className="panel rise flex items-center justify-between gap-3 px-4 py-3">
-                  <div className="min-w-0">
-                    <button type="button" className="row-link truncate text-[15px] font-semibold" onClick={() => onOpen(p.id)}>{pretty(p.name)}</button>
-                    <p className="muted truncate text-[12.5px]">{[p.user, p.down ? (p.last_seen ? `relevé ${ago(p.last_seen, status.generated_at)}` : 'jamais relevée') : 'niveaux non remontés'].filter(Boolean).join(' · ')}</p>
-                  </div>
-                  <StateDot state={hasNoData(p) && !p.down ? 'NODATA' : p.state} />
-                </li>
+      {!rows.length ? (
+        <p className="muted" style={{ padding: '48px 20px', textAlign: 'center', margin: 0 }}>{filter === 'ALERT' && !needle ? 'Aucune imprimante en alerte : tous les niveaux suivis sont au-dessus des seuils.' : 'Aucune imprimante ne correspond.'}{filter && <> <button type="button" className="link" onClick={() => onFilter(null)}>Voir toutes les imprimantes</button></>}</p>
+      ) : narrow ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 12, background: 'var(--bg)' }}>
+          {groups.map((g) => (
+            <Fragment key={g.name || 'all'}>
+              {g.name && <h3 className="faint" style={{ margin: '6px 2px 0', fontSize: 12, fontWeight: 600 }}>{g.name} · {g.items.length}</h3>}
+              {g.items.map((p) => {
+                const k = kindOf(p), issues = k === 'DOWN' ? [] : issuesOf(p)
+                return (
+                  <button key={p.id} type="button" className="pcard" onClick={() => onOpen(p.id)}>
+                    <span style={{ display: 'flex', alignItems: 'flex-start', gap: 10, width: '100%' }}>
+                      <span style={{ flex: 1, minWidth: 0 }}><span style={{ display: 'block', fontSize: 14.5, fontWeight: 600 }}>{pretty(p.name)}</span><span className="muted" style={{ display: 'block', fontSize: 12.5 }}>{placeOf(p)}</span></span>
+                      <KindChip k={k} />
+                    </span>
+                    {k === 'DOWN' ? <span className="muted" style={{ fontSize: 12.5 }}>{downText(p, now)}</span> : <Inks p={p} />}
+                    {issues.length > 0 && <span className="v-crit" style={{ fontSize: 12.5 }}>{issues.join(' · ')}</span>}
+                  </button>
+                )
+              })}
+            </Fragment>
+          ))}
+        </div>
+      ) : (
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead><tr>
+              <th scope="col" style={{ width: 128 }}>État</th><th scope="col">Imprimante</th>
+              <th scope="col">Encres <span className="faint" style={{ fontWeight: 400 }}>· % restant</span></th>
+              {showBox && <th scope="col" title="Boîtier de maintenance (encre usagée) : pourcentage de remplissage">Maintenance</th>}
+              <th scope="col">Rupture</th>
+              {showIp && <th scope="col">Adresse IP</th>}<th scope="col">Dernier relevé</th>
+            </tr></thead>
+            <tbody>
+              {groups.map((g) => (
+                <Fragment key={g.name || 'all'}>
+                  {g.name && <tr className="group"><td colSpan={cols}>{g.name} · {g.items.length}</td></tr>}
+                  {g.items.map((p) => {
+                    const k = kindOf(p), issues = k === 'DOWN' ? [] : issuesOf(p)
+                    return (
+                      <tr key={p.id} className={k === 'DOWN' ? 'is-down' : ''} onClick={() => onOpen(p.id)}>
+                        <td><KindChip k={k} /></td>
+                        <td style={{ whiteSpace: 'normal', minWidth: 220 }}>
+                          <button type="button" className="row-link" onClick={(e) => { e.stopPropagation(); onOpen(p.id) }}>{pretty(p.name)}</button>
+                          <div className="muted" style={{ fontSize: 12.5, marginTop: 1 }}>{[placeOf(p), p.user].filter(Boolean).join(' · ') || '—'}</div>
+                          {issues.length > 0 && <div className="v-crit" style={{ fontSize: 12.5, marginTop: 2 }}>{issues.join(' · ')}</div>}
+                        </td>
+                        <td>{k === 'DOWN' ? <span className="muted" style={{ fontSize: 12.5 }}>{downText(p, now)}</span> : <Inks p={p} />}</td>
+                        {showBox && <td>{k === 'DOWN' ? <span className="faint">—</span> : boxCell(p)}</td>}
+                        <td>{etaCell(p, k)}</td>
+                        {showIp && <td><span className="mono muted">{p.host}</span></td>}
+                        <td className="muted" style={{ fontSize: 12.5 }} title={p.last_seen ? fmtDate(p.last_seen) : undefined}>{p.last_seen ? ago(p.last_seen, now) : 'jamais'}</td>
+                      </tr>
+                    )
+                  })}
+                </Fragment>
               ))}
-            </ul>
-          )}
+            </tbody>
+          </table>
         </div>
       )}
+      <div className="faint" style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '12px 20px', fontSize: 12.5, borderTop: '1px solid var(--line)' }}>
+        <span>{rows.length} imprimante{rows.length > 1 ? 's' : ''} sur {all.length}</span><span>Tri : urgence, puis rupture estimée</span>
+      </div>
     </section>
   )
 }

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from .alerts import Thresholds, next_level, transition
+from .alerts import AlertSettings, Thresholds, next_level, transition
 from . import ledm
 from .config import CollectorConfig
 from .forecast import estimate
@@ -61,7 +61,9 @@ class Collector:
     ) -> None:
         self.storage = storage
         self.client = client
+        self.base_th = thresholds                       # config.toml : valeurs par défaut et hystérésis
         self.th = thresholds
+        self.settings = AlertSettings(thresholds.warn, thresholds.crit)
         self.notifier = notifier
         self.cfg = cfg
         self.clock = clock
@@ -70,18 +72,29 @@ class Collector:
         self._last_purge = float("-inf")
 
     # --- interrogation (I/O, exécutée en parallèle) ----------------------------------------------------------
-    def _poll(self, p: Printer) -> tuple[Printer, list[RawSupply] | None, str | None, str | None]:
+    def _poll(self, p: Printer) -> tuple[Printer, list[RawSupply] | None, str | None, str | None, dict | None]:
         try:
             raws = self.client.supplies(p.host)
             if not raws:
-                return p, None, None, "l'imprimante répond mais ne publie aucune table de consommables"
+                return p, None, None, "l'imprimante répond mais ne publie aucune table de consommables", None
             descr = self.client.sys_descr(p.host)
-            return p, self._complete_hp(p, raws, descr), descr, None
+            return p, self._complete_hp(p, raws, descr), descr, None, self._device_info(p)
         except SnmpError as exc:
-            return p, None, None, str(exc)
+            return p, None, None, str(exc), None
         except Exception as exc:  # défaut de programmation : ne doit pas faire tomber tout le cycle
             log.exception("erreur inattendue pendant l'interrogation de %s", p.name)
-            return p, None, None, f"erreur interne : {exc}"
+            return p, None, None, f"erreur interne : {exc}", None
+
+    def _device_info(self, p: Printer) -> dict | None:
+        """Fiche matérielle (série, compteur, état, alertes, bacs…). Facultative : un échec ne compromet jamais le relevé."""
+        read = getattr(self.client, "device_info", None)
+        if read is None:
+            return None
+        try:
+            return read(p.host)
+        except Exception as exc:
+            log.debug("%s : fiche matérielle indisponible (%s)", p.name, exc)
+            return None
 
     def _complete_hp(self, p: Printer, raws: list[RawSupply], descr: str | None) -> list[RawSupply]:
         """HP : si la table SNMP laisse des toners « inconnus », les combler via l'interface web. Jamais bloquant."""
@@ -101,9 +114,11 @@ class Collector:
     ) -> None:
         self.storage.add_event(ts, p.id, key, etype, pct, message, notify=etype not in _NO_EMAIL)
 
-    def _apply_success(self, p: Printer, raws: Sequence[RawSupply], descr: str | None, ts: float) -> int:
+    def _apply_success(self, p: Printer, raws: Sequence[RawSupply], descr: str | None, ts: float, info: dict | None = None) -> int:
         was_down = self.storage.is_down(p.id)
         self.storage.record_success(p.id, ts, descr)
+        if info:
+            self.storage.set_device_info(p.id, info, ts)
         created = 0
         if was_down:
             self._event(ts, p, None, EventType.UP, None, "de nouveau joignable")
@@ -119,8 +134,12 @@ class Collector:
             if s.pct_remaining is not None:
                 pct = s.pct_remaining
                 replaced = prev_pct is not None and pct - prev_pct >= self.cfg.replacement_jump
-                new_level = next_level(prev_level, pct, self.th, replaced=replaced)
-                etype = EventType.REPLACED if replaced else transition(prev_level, new_level)
+                if self.settings.tracks(s.kind.value, s.color):
+                    new_level = next_level(prev_level, pct, self.th, replaced=replaced)
+                    etype = EventType.REPLACED if replaced else transition(prev_level, new_level)
+                else:                                     # consommable non suivi : jamais d'alerte (ni de « retour à la normale »)
+                    new_level = Level.OK
+                    etype = EventType.REPLACED if replaced else None
                 if etype is not None:
                     self._event(ts, p, s.key, etype, pct, describe(s, etype))
                     created += 1
@@ -161,6 +180,9 @@ class Collector:
     def run_cycle(self, printers: Sequence[Printer]) -> CycleReport:
         start = self.clock()
         report = CycleReport()
+        # Réglages du dashboard relus à chaque cycle : un changement de seuil ou d'encres suivies vaut dès le relevé suivant.
+        self.settings = self.storage.alert_settings(AlertSettings(self.base_th.warn, self.base_th.crit))
+        self.th = self.settings.thresholds(self.base_th.hysteresis)
         active = [p for p in printers if p.enabled]
         for p in printers:
             self.storage.ensure_printer(p)               # crée si inconnue ; la base (éditée depuis le dashboard) fait foi
@@ -168,7 +190,7 @@ class Collector:
         if active:
             last = self.storage.last_cycle()
             gap = start - last["ts"] if last else 0.0
-            grace = gap > 2 * self.cfg.interval_s + 120
+            grace = self.cfg.interval_s > 0 and gap > 2 * self.cfg.interval_s + 120     # à la demande : pas d'« interruption » à excuser
             if grace:
                 log.warning("collecte reprise après %.0f min d'interruption : échecs de ce cycle non comptés vers « injoignable »", gap / 60)
             with ThreadPoolExecutor(max_workers=min(self.cfg.workers, len(active))) as pool:
@@ -179,14 +201,14 @@ class Collector:
                     again = {r[0].id: r for r in pool.map(self._poll, failed)}
                     results = [again.get(r[0].id, r) if r[1] is None else r for r in results]
             ts = self.clock()
-            for p, raws, descr, error in results:
+            for p, raws, descr, error, info in results:
                 report.polled += 1
                 if raws is None:
                     report.failed += 1
                     log.warning("%s : %s", p.name, error)
                     report.events += self._apply_failure(p, error or "inconnu", ts, grace)
                 else:
-                    report.events += self._apply_success(p, raws, descr, ts)
+                    report.events += self._apply_success(p, raws, descr, ts, info)
 
         if start - self._last_purge >= PURGE_EVERY_S:
             self.storage.purge(self.clock() - self.cfg.retention_days * 86400)

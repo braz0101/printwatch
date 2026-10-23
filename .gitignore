@@ -19,3 +19,12 @@ dist/
 build/
 *.log
 .DS_Store
+
+# comptes du dashboard (empreintes + clé de signature des cookies)
+users.json
+# coffre DPAPI de `printwatch secret` (chiffré, mais propre à ce serveur : jamais dans le dépôt)
+.secrets.enc
+
+# déploiement Windows : valeurs propres au serveur et web.config généré
+deploy/windows/site.local.psd1
+deploy/windows/iis/web.config

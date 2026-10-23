@@ -1,5 +1,7 @@
 # Dossier Technique & Spécifications PoC : PrintWatch
 
+> **Document historique.** Il décrit une version antérieure à la 0.13.0 ; l'état actuel est décrit dans le `README.md` (§20 Historique) et le `CHANGELOG.md`.
+
 > **Note de mise à jour (8 oct. 2026).** L'interface décrite plus bas (trois vues, grand graphique, heatmap, journal, tableau, mode sombre, Recharts) a été
 > **remplacée par une page unique en cartes** à la demande de l'utilisateur ; voir la section « Interface » du `README.md` pour l'état actuel.
 > Ajouts depuis : colonne `user` du CSV, collecte intégrée (`serve --collect`) avec battement de cœur (table `cycles`) et bandeaux d'état,
